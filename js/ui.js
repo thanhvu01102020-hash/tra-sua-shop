@@ -230,12 +230,19 @@ const UI = {
     const muteBtn = document.getElementById("btn-mute-shop");
     if (muteBtn) muteBtn.onclick = handlers.toggleMute;
 
-    this.renderTables(state, handlers);
+    this.renderTables(state, {
+      ...handlers,
+      moveTableCustId: Game.moveTableCustId,
+    });
     this.renderStaffSprites(state);
     this.renderShopFloor(state);
     this.renderFloorActions(state, handlers);
     this.renderQueue(state, handlers);
-    this.refreshQueuePanelMeta(state, handlers);
+    this.refreshQueuePanelMeta(state, {
+      ...handlers,
+      canEndDay: () => Game.isDayFloorClear(),
+      hasStuck: () => Game.hasStuckLastCustomers(),
+    });
     this.renderCounter(state, handlers);
     this.renderReadyTray(state, handlers);
     this.renderOrder(state);
@@ -296,12 +303,21 @@ const UI = {
             : ""
         }
       `;
+      if (handlers.moveTableCustId && t.status === "empty") {
+        el.classList.add("table-move-target");
+      }
       el.onclick = () => {
+        if (handlers.moveTableCustId) {
+          if (t.status === "empty" && handlers.pickMoveTable) handlers.pickMoveTable(t.id);
+          return;
+        }
         if (t.status === "dirty" && handlers.cleanTable) handlers.cleanTable(t.id);
         else if (t.status === "occupied" && cust) {
           if (cust.phase === "seated_ready" && handlers.takeOrder) handlers.takeOrder(cust.id);
           else if (cust.phase === "waiting_food" && handlers.deliverToTable)
             handlers.deliverToTable(t.id);
+        } else if (t.status === "empty" && handlers.pickMoveTable && handlers.moveTableCustId) {
+          handlers.pickMoveTable(t.id);
         }
       };
       box.appendChild(el);
@@ -368,10 +384,20 @@ const UI = {
     const readyDi = (state.readyTray || []).filter((t) => t.service === "dinein");
     const readyTw = (state.readyTray || []).filter((t) => t.service === "takeaway");
     const seated = (state.queue || []).filter((c) => c.phase === "seated_ready");
+    const movable = (state.queue || []).filter(
+      (c) =>
+        c.service === "dinein" &&
+        ["seated_ready", "waiting_food", "waiting_brew", "eating"].includes(c.phase)
+    );
     const bits = [];
     if (seated.length && !state.currentCustomer) {
       bits.push(
         `<button class="btn btn-sm btn-primary" id="fa-take">📝 Nhận đơn bàn (${seated[0].name})</button>`
+      );
+    }
+    if (movable.length && handlers.moveTable) {
+      bits.push(
+        `<button class="btn btn-sm btn-ghost" id="fa-move">🔄 Đổi bàn (${movable[0].name})</button>`
       );
     }
     if (readyDi.length) {
@@ -392,6 +418,8 @@ const UI = {
     box.innerHTML = bits.join(" ") || `<span class="muted small">Không có việc sàn ngay</span>`;
     const take = document.getElementById("fa-take");
     if (take) take.onclick = () => handlers.takeOrder(seated[0].id);
+    const move = document.getElementById("fa-move");
+    if (move) move.onclick = () => handlers.moveTable(movable[0].id);
     const serve = document.getElementById("fa-serve");
     if (serve) serve.onclick = () => handlers.serveReady(readyDi[0].id);
     const bag = document.getElementById("fa-bag");
@@ -440,7 +468,10 @@ const UI = {
       (c.service || "takeaway");
     el.dataset.id = c.id;
     el.style.left = this.actorLeftPct(c) + "%";
-    if (c.service === "dinein" && (c.phase === "seated_ready" || c.phase === "serving" || c.phase === "waiting_food" || c.phase === "eating")) {
+    if (
+      c.service === "dinein" &&
+      ["seated_ready", "serving", "waiting_food", "waiting_brew", "eating"].includes(c.phase)
+    ) {
       el.style.bottom = "58px";
     }
     const pct = Math.max(0, (c.patience / c.maxPatience) * 100);
@@ -451,6 +482,7 @@ const UI = {
       "seated_ready",
       "waiting_food",
       "waiting_pickup",
+      "waiting_brew",
     ].includes(c.phase);
     const statusMap = {
       walking_in: "đang tới…",
@@ -460,6 +492,7 @@ const UI = {
       waiting_table: "chờ bàn",
       seated_ready: "ngồi · chờ nhận",
       waiting_food: "chờ món",
+      waiting_brew: "đang pha…",
       waiting_pickup: "chờ túi",
       eating: "đang ăn…",
     };
@@ -505,7 +538,9 @@ const UI = {
           (c.service || "takeaway");
         if (
           c.service === "dinein" &&
-          ["seated_ready", "serving", "waiting_food", "eating"].includes(c.phase)
+          ["seated_ready", "serving", "waiting_food", "waiting_brew", "eating"].includes(
+            c.phase
+          )
         ) {
           el.style.bottom = "58px";
         } else {
@@ -518,6 +553,7 @@ const UI = {
           "seated_ready",
           "waiting_food",
           "waiting_pickup",
+          "waiting_brew",
         ].includes(c.phase);
         const fill = el.querySelector(".patience-fill");
         if (showPatience && fill) {
@@ -536,7 +572,8 @@ const UI = {
         c.phase === "waiting_table" ||
         c.phase === "seated_ready" ||
         c.phase === "waiting_food" ||
-        c.phase === "waiting_pickup"
+        c.phase === "waiting_pickup" ||
+        c.phase === "waiting_brew"
     );
     document.querySelectorAll(".queue-list .customer-card").forEach((card) => {
       const id = card.dataset.id;
@@ -574,6 +611,7 @@ const UI = {
       "seated_ready",
       "waiting_food",
       "waiting_pickup",
+      "waiting_brew",
       "eating",
       "serving",
       "walking_in",
@@ -582,21 +620,60 @@ const UI = {
     if (count) count.textContent = `(${active})`;
     if (!meta) return;
 
-    const busy =
-      active > 0 ||
-      (state.departing || []).length > 0 ||
-      state.currentCustomer ||
-      (state.readyTray || []).length > 0 ||
-      state.customersLeft > 0 ||
-      (state.tables || []).some((t) => t.status === "occupied" || t.status === "cleaning");
+    const canEnd =
+      typeof handlers.canEndDay === "function"
+        ? handlers.canEndDay()
+        : active === 0 &&
+          !(state.departing || []).length &&
+          !state.currentCustomer &&
+          !(state.readyTray || []).length &&
+          state.customersLeft <= 0 &&
+          !(state.tables || []).some((t) => t.status === "occupied" || t.status === "cleaning");
 
-    const done = !busy;
+    const stuck =
+      typeof handlers.hasStuck === "function"
+        ? handlers.hasStuck()
+        : state.customersLeft <= 0 &&
+          active > 0 &&
+          (state.queue || []).some((c) =>
+            ["waiting_food", "waiting_brew", "waiting_pickup", "eating", "waiting_table", "serving"].includes(
+              c.phase
+            )
+          );
 
-    if (done) {
+    if (canEnd) {
       meta.innerHTML = `<p class="muted center">Hết khách hôm nay.</p>
         <button class="btn btn-primary" id="btn-end-day">Kết thúc ngày →</button>`;
       const endBtn = document.getElementById("btn-end-day");
       if (endBtn && handlers.endDay) endBtn.onclick = handlers.endDay;
+    } else if (stuck && state.customersLeft <= 0) {
+      const stuckCust =
+        (state.queue || []).find((c) =>
+          ["waiting_food", "waiting_brew", "waiting_pickup", "eating", "waiting_table", "serving"].includes(
+            c.phase
+          )
+        ) || state.currentCustomer;
+      meta.innerHTML = `
+        <p class="muted center">Có khách đang treo — hãy Đổi bàn / Bưng món, hoặc xử lý.</p>
+        <div class="row-actions center-actions">
+          ${
+            stuckCust
+              ? `<button class="btn btn-sm btn-ghost" id="btn-unstick">Bỏ qua khách / Xử lý treo</button>`
+              : ""
+          }
+          <button class="btn btn-sm btn-secondary" id="btn-end-day-force">Kết thúc ngày →</button>
+        </div>`;
+      const u = document.getElementById("btn-unstick");
+      if (u && stuckCust && handlers.unstickCustomer) {
+        u.onclick = () => handlers.unstickCustomer(stuckCust.id);
+      }
+      const endBtn = document.getElementById("btn-end-day-force");
+      if (endBtn) {
+        endBtn.onclick = () => {
+          if (handlers.forceEndDay) handlers.forceEndDay();
+          else if (handlers.endDay) handlers.endDay();
+        };
+      }
     } else if (active === 0 && state.customersLeft > 0) {
       meta.innerHTML = `<p class="muted center">Đang chờ khách...</p>`;
     } else {
@@ -615,6 +692,7 @@ const UI = {
       "seated_ready",
       "waiting_food",
       "waiting_pickup",
+      "waiting_brew",
       "eating",
       "walking_in",
     ];
@@ -626,6 +704,7 @@ const UI = {
       if (c.phase === "seated_ready") return 1;
       if (c.phase === "waiting_pickup") return 2;
       if (c.phase === "waiting_food") return 3;
+      if (c.phase === "waiting_brew") return 3.5;
       if (c.phase === "waiting_table") return 4;
       if (c.phase === "eating") return 5;
       return 6;
@@ -656,26 +735,41 @@ const UI = {
           ? "🪑 Chờ nhận đơn"
           : c.phase === "waiting_food"
           ? "🍜 Chờ bưng món"
+          : c.phase === "waiting_brew"
+          ? "🧋 Đang pha…"
           : c.phase === "waiting_pickup"
           ? "🛍️ Chờ túi"
           : c.phase === "eating"
           ? "😋 Đang dùng"
           : "chờ quầy";
 
-      let action = `<span class="muted small">${phaseHint}</span>`;
+      const canMove =
+        c.service === "dinein" &&
+        ["seated_ready", "waiting_food", "waiting_brew", "eating", "serving"].includes(
+          c.phase
+        );
+      let actionBits = [];
       if (
         !state.currentCustomer &&
         ((c.phase === "waiting" && c.service === "takeaway" && c === firstTakeaway) ||
           c.phase === "seated_ready")
       ) {
-        action = `<button class="btn btn-sm btn-primary take-btn">Nhận đơn</button>`;
+        actionBits.push(`<button class="btn btn-sm btn-primary take-btn">Nhận đơn</button>`);
       }
+      if (canMove && handlers.moveTable) {
+        actionBits.push(
+          `<button class="btn btn-sm btn-ghost move-btn" title="Chuyển sang bàn trống sạch">Đổi bàn</button>`
+        );
+      }
+      const action =
+        actionBits.join(" ") || `<span class="muted small">${phaseHint}</span>`;
 
       div.innerHTML = `
         <div class="cust-emoji">${c.emoji}</div>
         <div class="cust-info">
           <div class="cust-name">${c.name}${c.isNPC ? " · " + c.npcRole : ""}
-            ${this.serviceBadge(c.service)} ${typeHint}</div>
+            ${this.serviceBadge(c.service)} ${typeHint}
+            ${c.tableId ? `<span class="muted small">· ${c.tableId.replace("t", "B")}</span>` : ""}</div>
           <div class="muted small">${Game.orderTicketText(c.order)}</div>
           ${
             c.phase !== "walking_in" && c.phase !== "eating"
@@ -683,10 +777,12 @@ const UI = {
               : `<div class="muted small">${phaseHint}</div>`
           }
         </div>
-        ${action}
+        <div class="cust-actions">${action}</div>
       `;
       const btn = div.querySelector(".take-btn");
       if (btn) btn.onclick = () => handlers.takeOrder(c.id);
+      const moveBtn = div.querySelector(".move-btn");
+      if (moveBtn) moveBtn.onclick = () => handlers.moveTable(c.id);
       list.appendChild(div);
     });
   },
@@ -1071,6 +1167,33 @@ const UI = {
   hasModal() {
     const root = document.getElementById("modal-root-global");
     return !!(root && root.innerHTML.trim());
+  },
+
+  renderMoveTableModal(state, customer, handlers) {
+    const empties = (state.tables || []).filter((t) => t.status === "empty");
+    const rows = empties.length
+      ? empties
+          .map(
+            (t) =>
+              `<button type="button" class="btn btn-secondary move-table-pick" data-table="${t.id}">
+                🪑 Bàn ${t.id.replace("t", "")} — trống sạch
+              </button>`
+          )
+          .join("")
+      : `<p class="muted">Không còn bàn trống sạch. Hãy dọn bàn bẩn trước.</p>`;
+    this.modal(`
+      <h2>Đổi bàn</h2>
+      <p>Chuyển <b>${customer.emoji} ${customer.name}</b>
+        ${customer.tableId ? `(đang ở ${customer.tableId.replace("t", "B")})` : ""}
+        sang bàn trống sạch.</p>
+      <div class="move-table-list">${rows}</div>
+      <p class="hint small">Hoặc bấm trực tiếp bàn trống trên sàn quán.</p>
+      <button type="button" class="btn btn-ghost" id="modal-close">Huỷ</button>
+    `);
+    document.getElementById("modal-close").onclick = handlers.cancel;
+    document.querySelectorAll(".move-table-pick").forEach((btn) => {
+      btn.onclick = () => handlers.pick(btn.getAttribute("data-table"));
+    });
   },
 
   renderRecipesModal(state, onClose) {

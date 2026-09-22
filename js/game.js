@@ -16,6 +16,8 @@ const Game = {
   staffTimers: { take: 0, serve: 0, clean: 0, brew: 0 },
   staffBrewJobs: [],
   cleanJob: null, // { tableId, t, dur, by: 'player'|'staff' }
+  moveTableCustId: null, // when set, player is picking a target table for Đổi bàn
+  _hangToastAt: 0,
 
   boot() {
     UI.init();
@@ -501,6 +503,7 @@ const Game = {
     this.state.shopOpen = true;
     this.state.tables = this.buildTables();
     this.cleanJob = null;
+    this.moveTableCustId = null;
     this.staffTimers = { take: 1.5, serve: 2, clean: 2.5, brew: 0.8 };
     this.staffBrewJobs = [];
 
@@ -551,6 +554,14 @@ const Game = {
       deliverToTable: (tableId) => this.deliverToTable(tableId),
       cleanTable: (tableId) => this.cleanTable(tableId),
       seatWaiting: (custId) => this.trySeatCustomer(custId),
+      moveTable: (custId) => this.beginMoveTable(custId),
+      pickMoveTable: (tableId) => this.completeMoveTable(tableId),
+      cancelMoveTable: () => this.cancelMoveTable(),
+      unstickCustomer: (custId) => this.unstickCustomer(custId),
+      forceEndDay: () => {
+        this.forceClearFloorForEnd();
+        this.endDay();
+      },
       openRecipes: () => {
         this.sfxClick();
         UI.renderRecipesModal(this.state, () => UI.closeModal());
@@ -842,16 +853,427 @@ const Game = {
     this.renderShop();
   },
 
+  findCustomerById(id) {
+    if (!id || !this.state) return null;
+    if (this.state.currentCustomer && this.state.currentCustomer.id === id) {
+      return this.state.currentCustomer;
+    }
+    return (this.state.queue || []).find((c) => c.id === id) || null;
+  },
+
+  canMoveTable(customer) {
+    if (!customer || customer.service !== "dinein") return false;
+    return [
+      "seated_ready",
+      "serving",
+      "waiting_food",
+      "waiting_brew",
+      "eating",
+    ].includes(customer.phase);
+  },
+
+  beginMoveTable(custId) {
+    const c = this.findCustomerById(custId);
+    if (!c || !this.canMoveTable(c)) {
+      UI.toast("Không thể đổi bàn khách này", "bad");
+      return;
+    }
+    const empties = (this.state.tables || []).filter((t) => t.status === "empty");
+    if (!empties.length) {
+      UI.toast("Không còn bàn trống sạch", "bad");
+      this.sfxBad();
+      return;
+    }
+    this.sfxClick();
+    this.moveTableCustId = c.id;
+    UI.renderMoveTableModal(this.state, c, {
+      pick: (tableId) => this.completeMoveTable(tableId),
+      cancel: () => this.cancelMoveTable(),
+    });
+  },
+
+  cancelMoveTable() {
+    this.moveTableCustId = null;
+    UI.closeModal();
+    this.renderShop();
+  },
+
+  completeMoveTable(targetTableId) {
+    const custId = this.moveTableCustId;
+    this.moveTableCustId = null;
+    UI.closeModal();
+    const customer = this.findCustomerById(custId);
+    if (!customer || !this.canMoveTable(customer)) {
+      UI.toast("Khách không còn ngồi để đổi bàn", "bad");
+      this.renderShop();
+      return;
+    }
+    const target = (this.state.tables || []).find((t) => t.id === targetTableId);
+    if (!target || target.status !== "empty") {
+      UI.toast("Bàn đích không trống sạch", "bad");
+      this.sfxBad();
+      this.renderShop();
+      return;
+    }
+    const oldId = customer.tableId;
+    const old = oldId
+      ? (this.state.tables || []).find((t) => t.id === oldId)
+      : null;
+
+    // Free old table: dirty if food already at table / eating; else empty
+    if (old) {
+      const hadFood =
+        customer.phase === "eating" ||
+        customer.phase === "waiting_food" ||
+        !!(this.state.readyTray || []).find(
+          (t) => t.customerId === customer.id && t.service === "dinein"
+        );
+      if (old.customerId === customer.id || old.status === "occupied") {
+        old.status = hadFood ? "dirty" : "empty";
+        old.customerId = null;
+        old.cleanT = 0;
+      }
+    }
+
+    target.status = "occupied";
+    target.customerId = customer.id;
+    customer.tableId = target.id;
+    customer.pos = this.tablePos(target.index, this.state.tables.length);
+    customer.targetPos = customer.pos;
+
+    // Keep ready tray linked by customerId; refresh tableId
+    (this.state.readyTray || []).forEach((tray) => {
+      if (tray.customerId === customer.id) tray.tableId = target.id;
+    });
+    this.staffBrewJobs.forEach((job) => {
+      if (job.customerId === customer.id) job.tableId = target.id;
+    });
+
+    this.sfxOk();
+    UI.toast(
+      `Đã đổi ${customer.name} sang bàn ${target.id.replace("t", "B")}`,
+      "good"
+    );
+    this.renderShop();
+    this.save();
+  },
+
+  /**
+   * Last-resort: force-resolve a stuck customer so the day can finish.
+   */
+  unstickCustomer(custId) {
+    const c = this.findCustomerById(custId);
+    if (!c) {
+      this.syncFloorIntegrity(true);
+      this.renderShop();
+      return;
+    }
+    this.sfxClick();
+    if (this.state.currentCustomer && this.state.currentCustomer.id === c.id) {
+      this.state.currentCustomer = null;
+      this.brewSession = null;
+      if (this.stateName === "BREW") this.stateName = "SHOP";
+    }
+    this.staffBrewJobs = (this.staffBrewJobs || []).filter(
+      (j) => j.customerId !== c.id
+    );
+
+    if (c.phase === "eating") {
+      this.forceFinishEating(c);
+      return;
+    }
+    if (c.phase === "waiting_food") {
+      const tray = (this.state.readyTray || []).find((t) => t.customerId === c.id);
+      if (tray) {
+        this.deliverToTable(c.tableId, tray.id);
+        return;
+      }
+    }
+    if (c.phase === "waiting_pickup") {
+      const tray = (this.state.readyTray || []).find((t) => t.customerId === c.id);
+      if (tray) {
+        this.completeTakeaway(tray);
+        return;
+      }
+    }
+
+    this.state.readyTray = (this.state.readyTray || []).filter(
+      (t) => t.customerId !== c.id
+    );
+    this.state.queue = this.state.queue.filter((x) => x.id !== c.id);
+    if (this.dayStats) this.dayStats.left++;
+    const stars = 1;
+    this.applyStarRep(stars);
+    this.recordStars(stars);
+    this.beginDepart(c, "left");
+    UI.toast("Đã xử lý khách treo: " + c.name, "info");
+    this.renderShop();
+    this.save();
+  },
+
+  forceFinishEating(customer) {
+    if (!customer || customer.phase !== "eating") return false;
+    let result = customer.pendingResult;
+    if (!result) {
+      result = { quality: "ok", elapsed: 0, fast: true, softLimit: GAME_CONFIG.brewTimeLimit };
+    }
+    this.state.queue = this.state.queue.filter((x) => x.id !== customer.id);
+    try {
+      this.applyPaymentAndRate(customer, result, "dinein");
+    } catch (err) {
+      // Ensure customer leaves even if payment UI fails
+      this.markTableDirty(customer);
+      this.beginDepart(customer, "served");
+      UI.toast("Khách dùng xong (khôi phục treo)", "info");
+    }
+    return true;
+  },
+
+  /**
+   * Reconcile tables / trays / stuck phases so the last customer cannot soft-lock the day.
+   */
+  syncFloorIntegrity(forceToast) {
+    if (!this.state || !this.state.shopOpen) return false;
+    let changed = false;
+    const queue = this.state.queue || [];
+    const alive = new Set(queue.map((c) => c.id));
+    if (this.state.currentCustomer) alive.add(this.state.currentCustomer.id);
+
+    // Orphan ready trays (customer left or wrong phase)
+    const keepTrays = [];
+    (this.state.readyTray || []).forEach((tray) => {
+      const c = this.findCustomerById(tray.customerId);
+      if (!c) {
+        changed = true;
+        return;
+      }
+      const okPhase =
+        (tray.service === "takeaway" && c.phase === "waiting_pickup") ||
+        (tray.service === "dinein" && c.phase === "waiting_food");
+      if (!okPhase) {
+        // If dine-in still waiting brew/serving, keep briefly; else discard
+        if (
+          tray.service === "dinein" &&
+          (c.phase === "waiting_brew" || c.phase === "serving")
+        ) {
+          tray.tableId = c.tableId || tray.tableId;
+          keepTrays.push(tray);
+          return;
+        }
+        changed = true;
+        return;
+      }
+      // Keep tray linked to customer id; refresh tableId
+      if (c.tableId) tray.tableId = c.tableId;
+      keepTrays.push(tray);
+    });
+    if (keepTrays.length !== (this.state.readyTray || []).length) {
+      this.state.readyTray = keepTrays;
+      changed = true;
+    }
+
+    // Ghost / desynced tables
+    (this.state.tables || []).forEach((t) => {
+      if (t.status === "occupied") {
+        const c = t.customerId ? this.findCustomerById(t.customerId) : null;
+        if (!c) {
+          // Occupied with no living customer → free
+          t.status = "empty";
+          t.customerId = null;
+          t.cleanT = 0;
+          changed = true;
+        } else if (c.tableId && c.tableId !== t.id) {
+          // Table points at customer who moved elsewhere
+          t.status = "empty";
+          t.customerId = null;
+          changed = true;
+        } else if (!c.tableId && c.service === "dinein") {
+          c.tableId = t.id;
+          changed = true;
+        }
+      } else if (t.status === "cleaning" && !this.cleanJob) {
+        // Cleaning flag without job → finish as empty
+        t.status = "empty";
+        t.customerId = null;
+        t.cleanT = 0;
+        changed = true;
+      }
+    });
+
+    // Dine-in customers missing table link while seated — preserve phase
+    queue.forEach((c) => {
+      if (c.service !== "dinein") return;
+      if (
+        !["seated_ready", "serving", "waiting_food", "waiting_brew", "eating"].includes(
+          c.phase
+        )
+      ) {
+        return;
+      }
+      const keepPhase = c.phase;
+      const keepMood = c.mood;
+      if (c.tableId) {
+        const t = this.state.tables.find((x) => x.id === c.tableId);
+        if (!t) {
+          c.tableId = null;
+          changed = true;
+        } else if (t.status === "dirty" || t.status === "cleaning") {
+          // Table wrongly marked — reclaim if this customer still owns it
+          if (t.customerId === c.id || !t.customerId) {
+            t.status = "occupied";
+            t.customerId = c.id;
+            changed = true;
+          } else {
+            c.tableId = null;
+            changed = true;
+          }
+        } else if (t.status === "empty") {
+          t.status = "occupied";
+          t.customerId = c.id;
+          changed = true;
+        } else if (t.customerId !== c.id) {
+          t.customerId = c.id;
+          changed = true;
+        }
+      }
+      if (!c.tableId) {
+        const free = this.freeTable();
+        if (free) {
+          free.status = "occupied";
+          free.customerId = c.id;
+          c.tableId = free.id;
+          c.pos = this.tablePos(free.index, this.state.tables.length);
+          c.targetPos = c.pos;
+          c.phase = keepPhase;
+          c.mood = keepMood;
+          changed = true;
+        }
+      }
+    });
+
+    // Orphan staff brew jobs without customer → drop
+    const jobs = [];
+    (this.staffBrewJobs || []).forEach((job) => {
+      const c = this.findCustomerById(job.customerId);
+      if (!c) {
+        changed = true;
+        return;
+      }
+      jobs.push(job);
+    });
+    this.staffBrewJobs = jobs;
+
+    // Force-finish overlong eating (fail-safe if normal tick missed)
+    if (!UI.hasModal()) {
+      const eatMax = (GAME_CONFIG.eatDuration || 4.5) * 1.35;
+      (this.state.queue || [])
+        .filter((c) => c.phase === "eating")
+        .forEach((c) => {
+          if (c.eatT == null) c.eatT = 0;
+          if (
+            c.eatT >= eatMax ||
+            (c.eatT >= (GAME_CONFIG.eatDuration || 4.5) && !c.pendingResult)
+          ) {
+            this.forceFinishEating(c);
+            changed = true;
+          }
+        });
+    }
+
+    // Long waiting_food with tray → auto force-serve; without tray → leave
+    if (!UI.hasModal()) {
+      const waitingFood = (this.state.queue || []).filter((c) => c.phase === "waiting_food");
+      waitingFood.forEach((c) => {
+        const waited = (c.maxPatience || 0) - (c.patience || 0);
+        const tray = (this.state.readyTray || []).find((t) => t.customerId === c.id);
+        if (tray && c.patience <= Math.max(3, (c.maxPatience || 30) * 0.12)) {
+          this.deliverToTable(c.tableId, tray.id);
+          changed = true;
+        } else if (!tray && waited > 28) {
+          this.state.queue = this.state.queue.filter((x) => x.id !== c.id);
+          if (this.dayStats) this.dayStats.left++;
+          this.applyStarRep(1);
+          this.recordStars(1);
+          this.beginDepart(c, "left");
+          UI.toast(c.name + " chờ món quá lâu — đã bỏ đi", "bad");
+          changed = true;
+        }
+      });
+    }
+
+    // waiting_brew with no matching job → return to serving / orderable
+    queue
+      .filter((c) => c.phase === "waiting_brew")
+      .forEach((c) => {
+        const job = (this.staffBrewJobs || []).find((j) => j.customerId === c.id);
+        if (!job) {
+          if (!this.state.currentCustomer) {
+            this.state.currentCustomer = c;
+            c.phase = "serving";
+            c.mood = "order";
+            this.state.queue = this.state.queue.filter((x) => x.id !== c.id);
+            changed = true;
+            if (forceToast) UI.toast("Đơn pha chế treo — trả về quầy", "info");
+          }
+        }
+      });
+
+    return changed;
+  },
+
+  isDayFloorClear() {
+    if (!this.state) return false;
+    const activePhases = new Set([
+      "waiting",
+      "waiting_table",
+      "seated_ready",
+      "waiting_food",
+      "waiting_pickup",
+      "waiting_brew",
+      "eating",
+      "serving",
+      "walking_in",
+    ]);
+    const active = (this.state.queue || []).filter((c) => activePhases.has(c.phase)).length;
+    if (active > 0) return false;
+    if ((this.state.departing || []).length > 0) return false;
+    if (this.state.currentCustomer) return false;
+    if ((this.state.readyTray || []).length > 0) return false;
+    if (this.state.customersLeft > 0) return false;
+    if ((this.staffBrewJobs || []).length > 0) return false;
+    if ((this.state.tables || []).some((t) => t.status === "occupied" || t.status === "cleaning")) {
+      return false;
+    }
+    return true;
+  },
+
+  hasStuckLastCustomers() {
+    if (!this.state || this.state.customersLeft > 0) return false;
+    if (this.state.currentCustomer) return true;
+    if ((this.staffBrewJobs || []).length > 0) return true;
+    return (this.state.queue || []).some((c) =>
+      ["waiting_food", "waiting_brew", "waiting_pickup", "eating", "serving", "waiting_table"].includes(
+        c.phase
+      )
+    );
+  },
+
   beginDepart(customer, reason) {
     if (!customer) return;
     // free table if still marked occupied without dirty transition
     if (customer.tableId) {
       const t = this.state.tables.find((x) => x.id === customer.tableId);
-      if (t && t.customerId === customer.id && t.status === "occupied") {
-        // angry leave without eating → free table (not dirty)
-        if (reason === "angry" || reason === "left") {
-          t.status = "empty";
-          t.customerId = null;
+      if (t && (t.customerId === customer.id || t.status === "occupied")) {
+        if (t.customerId === customer.id || !this.findCustomerById(t.customerId)) {
+          // angry/left → empty; served should already be dirty via markTableDirty
+          if (reason === "angry" || reason === "left") {
+            t.status = "empty";
+            t.customerId = null;
+          } else if (t.status === "occupied") {
+            // Safety: never leave a ghost occupied table behind
+            t.status = "empty";
+            t.customerId = null;
+          }
         }
       }
       // after eating we already set dirty
@@ -1147,7 +1569,10 @@ const Game = {
 
     const customer = this.state.queue.find((c) => c.id === tray.customerId);
     if (!customer || customer.phase !== "waiting_food") {
-      UI.toast("Không tìm thấy khách chờ món", "bad");
+      // Orphan / desynced tray — discard so it cannot soft-lock end of day
+      this.state.readyTray = this.state.readyTray.filter((t) => t.id !== tray.id);
+      UI.toast("Món không khớp khách — đã bỏ khay", "info");
+      this.renderShop();
       return;
     }
 
@@ -1304,8 +1729,8 @@ const Game = {
     }
 
     // Barista: auto-brew in parallel (slots = barista count)
+    if (!this.staffBrewJobs) this.staffBrewJobs = [];
     if (nBarista > 0 && this.stateName === "SHOP") {
-      if (!this.staffBrewJobs) this.staffBrewJobs = [];
       while (this.staffBrewJobs.length < nBarista) {
         const cust = this.state.currentCustomer;
         if (!cust || this.brewSession) break;
@@ -1337,16 +1762,8 @@ const Game = {
         UI.toast("🧋 " + emp.name + " đang pha chế…", "info");
         changed = true;
       }
-      const still = [];
-      this.staffBrewJobs.forEach((job) => {
-        job.t += dt;
-        if (job.t >= job.dur) {
-          this.finishStaffBrew(job);
-          changed = true;
-        } else still.push(job);
-      });
-      this.staffBrewJobs = still;
     }
+    // Brew job ticking moved to tickShop (always runs; avoids orphan hangs)
 
     // Server: deliver, takeaway handoff, seat, soft-clean if no cleaner
     if (nServer > 0) {
@@ -1427,7 +1844,10 @@ const Game = {
       (this.state.currentCustomer && this.state.currentCustomer.id === job.customerId
         ? this.state.currentCustomer
         : null);
-    if (!customer) return;
+    if (!customer) {
+      // Customer already left — drop job silently (caller removes from list)
+      return;
+    }
     let session;
     try {
       session = Brew.autoPerfect(job.order, this.state.upgrades, job.dur);
@@ -1460,6 +1880,66 @@ const Game = {
 
 
   /* ---------- DAY END ---------- */
+  forceClearFloorForEnd() {
+    // Silent clear so Kết thúc ngày is never soft-locked by ghost entities
+    this.staffBrewJobs = [];
+    this.brewSession = null;
+    this.moveTableCustId = null;
+    UI.closeModal();
+    if (this.state.currentCustomer) {
+      const c = this.state.currentCustomer;
+      this.state.currentCustomer = null;
+      if (!(this.state.queue || []).find((x) => x.id === c.id)) {
+        this.state.queue.push(c);
+      }
+    }
+    this.state.readyTray = [];
+    const left = [...(this.state.queue || [])];
+    this.state.queue = [];
+    left.forEach((c) => {
+      if (c.phase === "eating" && c.pendingResult) {
+        // Quiet settle: pay without modal
+        const result = c.pendingResult;
+        const price = this.orderPrice(c.order);
+        let pay = result.quality === "perfect" ? price : result.quality === "ok" ? Math.round(price * 0.7) : 0;
+        if (pay > 0) {
+          this.state.money += pay;
+          this.state.dayRevenue += pay;
+          if (this.dayStats) {
+            this.dayStats.revenue += pay;
+            this.dayStats.served++;
+          }
+        } else if (this.dayStats) this.dayStats.wrong++;
+        const stars = this.calcStars(result, c);
+        this.applyStarRep(stars);
+        this.recordStars(stars);
+        this.markTableDirty(c);
+        // Skip beginDepart animation — day is ending
+      } else {
+        if (this.dayStats) this.dayStats.left++;
+        this.applyStarRep(1);
+        this.recordStars(1);
+        if (c.tableId) {
+          const t = this.state.tables.find((x) => x.id === c.tableId);
+          if (t) {
+            t.status = "empty";
+            t.customerId = null;
+          }
+          c.tableId = null;
+        }
+      }
+    });
+    this.state.departing = [];
+    (this.state.tables || []).forEach((t) => {
+      if (t.status === "occupied" || t.status === "cleaning") {
+        t.status = "empty";
+        t.customerId = null;
+        t.cleanT = 0;
+      }
+    });
+    this.cleanJob = null;
+  },
+
   endDay() {
     this.state.shopOpen = false;
     this.stateName = "DAY_END";
@@ -1715,6 +2195,21 @@ const Game = {
     let needFullRender = false;
     let needQueueRefresh = false;
 
+    if (this.syncFloorIntegrity(false)) needFullRender = true;
+
+    // Progress barista jobs even if staff panel toggled off / count changed
+    if (this.staffBrewJobs && this.staffBrewJobs.length) {
+      const still = [];
+      this.staffBrewJobs.forEach((job) => {
+        job.t += dt;
+        if (job.t >= job.dur) {
+          this.finishStaffBrew(job);
+          needFullRender = true;
+        } else still.push(job);
+      });
+      this.staffBrewJobs = still;
+    }
+
     // cleaning progress
     if (this.cleanJob) {
       this.cleanJob.t += dt;
@@ -1785,12 +2280,10 @@ const Game = {
           c.pos += diff * Math.min(1, dt * 3);
         }
       } else if (c.phase === "eating") {
-        c.eatT += dt;
+        c.eatT = (c.eatT || 0) + dt;
         if (c.eatT >= GAME_CONFIG.eatDuration) {
-          const result = c.pendingResult;
-          this.state.queue = this.state.queue.filter((x) => x.id !== c.id);
-          this.applyPaymentAndRate(c, result, "dinein");
-          needFullRender = true;
+          // Defer finish to after iteration (mutation-safe)
+          c._finishEat = true;
         }
       } else if (c.phase === "waiting_pickup") {
         // patience while waiting for bag
@@ -1800,6 +2293,13 @@ const Game = {
       } else if (c.phase === "waiting_food" || c.phase === "seated_ready") {
         c.patience -= dt * 0.4;
       }
+    });
+
+    // Finish eaters after iteration (avoids forEach mutation + null result crash)
+    const finishEaters = (this.state.queue || []).filter((c) => c._finishEat);
+    finishEaters.forEach((c) => {
+      c._finishEat = false;
+      if (this.forceFinishEating(c)) needFullRender = true;
     });
 
     // departing
@@ -1871,6 +2371,11 @@ const Game = {
 
     if (this.tickStaff(dt)) needFullRender = true;
 
+    // Offer end-day / unstick when spawn is done
+    const dayMayEnd =
+      this.state.customersLeft <= 0 &&
+      (this.isDayFloorClear() || this.hasStuckLastCustomers());
+
     if (needFullRender && !UI.hasModal()) {
       this.renderShop();
       this.save();
@@ -1880,13 +2385,20 @@ const Game = {
         cleanTable: (id) => this.cleanTable(id),
         deliverToTable: (id) => this.deliverToTable(id),
         takeOrder: (id) => this.takeOrder(id),
+        pickMoveTable: (id) => this.completeMoveTable(id),
+        moveTableCustId: this.moveTableCustId,
       });
-      if (needQueueRefresh && !UI.hasModal()) {
+      if ((needQueueRefresh || dayMayEnd) && !UI.hasModal()) {
         UI.renderQueue(this.state, {
           takeOrder: (id) => this.takeOrder(id),
+          moveTable: (id) => this.beginMoveTable(id),
+          unstickCustomer: (id) => this.unstickCustomer(id),
         });
         UI.refreshQueuePanelMeta(this.state, {
           endDay: () => this.endDay(),
+          unstickCustomer: (id) => this.unstickCustomer(id),
+          canEndDay: () => this.isDayFloorClear(),
+          hasStuck: () => this.hasStuckLastCustomers(),
         });
         UI.renderReadyTray(this.state, {
           serveReady: (id) => this.serveReady(id),
@@ -1896,6 +2408,7 @@ const Game = {
           serveReady: (id) => this.serveReady(id),
           cleanTable: (id) => this.cleanTable(id),
           deliverToTable: (id) => this.deliverToTable(id),
+          moveTable: (id) => this.beginMoveTable(id),
         });
       } else {
         UI.syncPatienceBars(this.state);

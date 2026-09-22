@@ -65,5 +65,7 @@ tra-sua-shop/
 - Không có asset ngoài emoji/CSS.
 - Combo prep nối tiếp (trà rồi snack).
 - Staff AI theo timer (nhiều NV cùng role = nhanh hơn / song song); barista tự pha.
+- **Đổi bàn** cho khách tại chỗ (ghế trống sạch) để gỡ kẹt bàn.
+- Fail-safe hết ngày: đồng bộ bàn/khay, auto-bưng/ăn xong, nút xử lý treo nếu cần.
 - Chưa pathfinding; quản lý chỉ có ưu tiên pha/dọn nhẹ.
 - Mobile chơi được; tối ưu quanh ≥900px.
