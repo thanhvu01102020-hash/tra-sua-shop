@@ -7,7 +7,7 @@ const GAME_CONFIG = {
   maxRep: 5,
   customerPatienceBase: 45,
   brewTimeLimit: 35,
-  saveKey: "trasua_shop_save_v2",
+  saveKey: "trasua_shop_save_v4",
   saveKeyLegacy: "trasua_shop_save_v1",
   totalDays: 30,
   tipChance: 0.28,
@@ -610,14 +610,16 @@ const LEGACY_UPGRADE_MAP = {
 
 /* ===== v3: tables, staff, dine-in / takeaway ===== */
 
-GAME_CONFIG.saveKey = "trasua_shop_save_v3";
+GAME_CONFIG.saveKey = "trasua_shop_save_v4";
+GAME_CONFIG.saveKeyLegacyV3 = "trasua_shop_save_v3";
 GAME_CONFIG.saveKeyLegacyV2 = "trasua_shop_save_v2";
 GAME_CONFIG.saveKeyLegacy = "trasua_shop_save_v1";
-GAME_CONFIG.saveVersion = 3;
+GAME_CONFIG.saveVersion = 4;
 GAME_CONFIG.maxTables = 6;
 GAME_CONFIG.cleanDuration = 2.2;
 GAME_CONFIG.eatDuration = 4.5;
 GAME_CONFIG.readyPickupWait = 18;
+GAME_CONFIG.maxStaffTotal = 8;
 
 /** Stronger variety — avoid everyone ordering the same single type */
 function orderTypeWeights(day) {
@@ -675,49 +677,203 @@ function tableCount(day, upgrades) {
 const STAFF_ROLES = [
   {
     id: "cashier",
-    name: "Thu ngân / pha chế",
+    name: "Thu ngân",
     emoji: "🧾",
-    blurb: "Tự nhận đơn quầy mang đi & hỗ trợ pha nhanh hơn một chút.",
-    wage: 12000,
-    wageScale: 800,
+    blurb: "Tự nhận đơn mang đi & đơn bàn (Nhận đơn) khi bạn bận quản lý.",
+    wage: 11000,
+    wageScale: 750,
     unlockDay: 3,
-    effect: "autoTakeaway + brewSpeed",
+    effect: "autoAccept",
+    firePriority: 2,
+  },
+  {
+    id: "barista",
+    name: "Nhân viên pha chế",
+    emoji: "🧋",
+    blurb: "Tự pha trà / chuẩn bị snack từ hàng đợi. Nhiều người = pha song song nhanh hơn.",
+    wage: 15000,
+    wageScale: 1000,
+    unlockDay: 4,
+    effect: "autoBrew",
+    firePriority: 4,
   },
   {
     id: "server",
     name: "Phục vụ",
     emoji: "🍽️",
-    blurb: "Tự bưng món tới bàn và dọn bàn chậm khi rảnh.",
-    wage: 14000,
-    wageScale: 900,
+    blurb: "Bưng món tới bàn, giao túi mang đi, hỗ trợ xếp khách vào bàn trống.",
+    wage: 13000,
+    wageScale: 850,
     unlockDay: 4,
-    effect: "autoServe + softClean",
+    effect: "autoServe + handoff + seat",
+    firePriority: 3,
   },
   {
-    id: "janitor",
+    id: "cleaner",
     name: "Tạp vụ",
     emoji: "🧹",
-    blurb: "Ưu tiên dọn bàn bẩn nhanh.",
+    blurb: "Ưu tiên dọn bàn bẩn nhanh — bàn sạch = khách ngồi được.",
     wage: 10000,
     wageScale: 700,
     unlockDay: 5,
     effect: "priorityClean",
+    firePriority: 1,
   },
 ];
 
-function staffWage(role, day) {
-  return role.wage + Math.floor(Math.max(0, day - 1) * role.wageScale);
+/** Legacy role id map (v3 → v4). */
+const STAFF_ROLE_ALIAS = { janitor: "cleaner" };
+
+const STAFF_NAME_POOL = [
+  "Lan", "Hùng", "My", "Tuấn", "Hà", "Đức", "Vy", "Phúc", "Nhung", "Khoa",
+  "Trang", "Huy", "Ngọc", "Bảo", "Chi", "An", "Yến", "Tâm", "Quỳnh", "Long",
+];
+
+const STAFF_PRIORITY_OPTIONS = [
+  { id: "brew", label: "Ưu tiên pha chế", emoji: "🧋" },
+  { id: "clean", label: "Ưu tiên dọn bàn", emoji: "🧹" },
+  { id: "balanced", label: "Cân bằng", emoji: "⚖️" },
+];
+
+function staffRoleById(roleId) {
+  const id = STAFF_ROLE_ALIAS[roleId] || roleId;
+  return STAFF_ROLES.find((r) => r.id === id) || null;
 }
 
-/** Max simultaneous hired staff by day. */
-function maxStaffSlots(day) {
-  if (day < 3) return 0;
-  if (day < 8) return 1;
-  if (day < 15) return 2;
-  return 3;
+function staffWage(role, day) {
+  const r = typeof role === "string" ? staffRoleById(role) : role;
+  if (!r) return 0;
+  return r.wage + Math.floor(Math.max(0, day - 1) * r.wageScale);
+}
+
+/**
+ * Soft caps grow with day + seating/sign upgrades.
+ * Day1–2: 0 · Day3: 1 · mid ~3–4 · late ~6–8.
+ */
+function maxStaffSlots(day, upgrades) {
+  const d = Math.max(1, day | 0);
+  let base = 0;
+  if (d < 3) base = 0;
+  else if (d <= 3) base = 1;
+  else if (d <= 6) base = 2;
+  else if (d <= 10) base = 3;
+  else if (d <= 14) base = 4;
+  else if (d <= 20) base = 6;
+  else base = 7;
+  const seat = Math.max(0, Math.min(4, (upgrades && upgrades.seating) | 0));
+  const sign = Math.max(0, Math.min(4, (upgrades && upgrades.sign) | 0));
+  const bonus = Math.floor(seat / 2) + (sign >= 2 ? 1 : 0) + (sign >= 4 ? 1 : 0);
+  return Math.min(GAME_CONFIG.maxStaffTotal, base + bonus);
+}
+
+/** Normalize any save shape → [{id, role, name}]. */
+function normalizeStaffList(raw) {
+  if (!raw) return [];
+  if (Array.isArray(raw)) {
+    return raw
+      .map((e, i) => {
+        if (!e) return null;
+        const role = STAFF_ROLE_ALIAS[e.role] || e.role;
+        if (!staffRoleById(role)) return null;
+        return {
+          id: e.id || "emp_" + i + "_" + role,
+          role,
+          name: e.name || STAFF_NAME_POOL[i % STAFF_NAME_POOL.length],
+        };
+      })
+      .filter(Boolean);
+  }
+  // v3 boolean map { cashier, server, janitor }
+  const list = [];
+  ["cashier", "server", "janitor", "cleaner", "barista"].forEach((key) => {
+    if (!raw[key]) return;
+    const role = STAFF_ROLE_ALIAS[key] || key;
+    if (!staffRoleById(role)) return;
+    list.push({
+      id: "mig_" + role,
+      role,
+      name: STAFF_NAME_POOL[list.length % STAFF_NAME_POOL.length],
+    });
+  });
+  if (raw.employees && Array.isArray(raw.employees)) {
+    return normalizeStaffList(raw.employees);
+  }
+  return list;
 }
 
 function staffCount(staff) {
-  if (!staff) return 0;
-  return (staff.cashier ? 1 : 0) + (staff.server ? 1 : 0) + (staff.janitor ? 1 : 0);
+  return normalizeStaffList(staff).length;
+}
+
+function countRole(staff, roleId) {
+  const id = STAFF_ROLE_ALIAS[roleId] || roleId;
+  return normalizeStaffList(staff).filter((e) => e.role === id).length;
+}
+
+function employeesOfRole(staff, roleId) {
+  const id = STAFF_ROLE_ALIAS[roleId] || roleId;
+  return normalizeStaffList(staff).filter((e) => e.role === id);
+}
+
+function totalStaffWages(staff, day) {
+  return normalizeStaffList(staff).reduce((sum, e) => sum + staffWage(e.role, day), 0);
+}
+
+/** Fire order when unpaid: lowest firePriority first. */
+function sortEmployeesForFire(list) {
+  return list.slice().sort((a, b) => {
+    const ra = staffRoleById(a.role);
+    const rb = staffRoleById(b.role);
+    const pa = ra ? ra.firePriority : 0;
+    const pb = rb ? rb.firePriority : 0;
+    if (pa !== pb) return pa - pb;
+    return String(a.id).localeCompare(String(b.id));
+  });
+}
+
+function pickStaffName(existing) {
+  const used = new Set((existing || []).map((e) => e.name));
+  for (let i = 0; i < STAFF_NAME_POOL.length; i++) {
+    if (!used.has(STAFF_NAME_POOL[i])) return STAFF_NAME_POOL[i];
+  }
+  return STAFF_NAME_POOL[(existing || []).length % STAFF_NAME_POOL.length];
+}
+
+function managerTip(day, staff, money, slots) {
+  const n = staffCount(staff);
+  if (day <= 2) return "Ngày đầu tự làm: Nhận đơn → Pha → Bưng / Giao → Dọn bàn.";
+  if (day === 3 && n === 0 && slots >= 1) return "Có thể thuê thu ngân — rảnh tay pha chế hơn.";
+  if (day >= 4 && countRole(staff, "barista") === 0 && slots > n) {
+    return "Tiệm lớn rồi — thuê pha chế để rảnh tay quản lý.";
+  }
+  if (day >= 8 && n < Math.min(3, slots)) {
+    return "Gợi ý quản lý: thuê thêm phục vụ / tạp vụ khi bàn đông.";
+  }
+  if (day >= 15 && n >= 4) {
+    return "Bạn là quản lý: chỉnh ưu tiên pha/dọn, theo dõi sao & doanh thu.";
+  }
+  if (money < 20000 && n > 0) {
+    return "Giữ tiền trả lương — thiếu sẽ phải cho nghỉ nhân viên ưu tiên thấp.";
+  }
+  return null;
+}
+
+/** Brew duration (seconds) for staff barista; scales with devices & barista count. */
+function baristaBrewDuration(order, upgrades, baristaCount) {
+  const fx = getEffects(upgrades || {});
+  const n = Math.max(1, baristaCount | 0);
+  let base = 5.5;
+  if (order && order.type === "snack") base = 4.2;
+  if (order && order.type === "combo") base = 8.5;
+  const drinkSp =
+    order && order.recipe && order.recipe.method === "blend"
+      ? fx.blendSpeed || 1
+      : fx.shakeSpeed || 1;
+  const snackSp = fx.snackSpeed || 1;
+  let speed = 1;
+  if (order && order.type === "drink") speed = drinkSp;
+  else if (order && order.type === "snack") speed = snackSp;
+  else speed = (drinkSp + snackSp) / 2;
+  const stack = 1 + (n - 1) * 0.18;
+  return Math.max(2.0, Math.min(14, base / (speed * stack)));
 }

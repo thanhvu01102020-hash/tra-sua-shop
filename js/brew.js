@@ -265,4 +265,40 @@ const Brew = {
   canAffordSnack(inventory, snack) {
     return (snack.ingredients || []).every((id) => (inventory[id] || 0) > 0);
   },
+
+  /**
+   * Staff barista: build a perfect session result without UI.
+   * Caller should Brew.consumeStock after. elapsedSec affects fast/star timing.
+   */
+  autoPerfect(order, upgrades, elapsedSec) {
+    const session = this.createSession(order, upgrades);
+    const s = session.selections;
+    if (order.recipe) {
+      s.base = order.recipe.base;
+      s.milk = order.recipe.milk;
+      s.topping = order.recipe.topping;
+      s.sugar = order.recipe.sugar;
+      s.ice = order.recipe.ice;
+      s.method = order.recipe.method;
+    }
+    if (order.snack) {
+      s.snack_pick = order.snack.id;
+      s.snack_method = order.snack.method;
+    }
+    session.drinkDone = !order.recipe;
+    session.snackDone = !order.snack;
+    session.done = true;
+    session.startTime = Date.now() - Math.max(1, elapsedSec || 5) * 1000;
+    session.result = this.evaluate(session);
+    if (!session.result || session.result.quality !== "perfect") {
+      session.result = session.result || {};
+      session.result.quality = "perfect";
+      session.result.perfect = true;
+      session.result.fast =
+        (elapsedSec || 5) <= (order.type === "combo" ? 32 : order.type === "snack" ? 14 : 20);
+      session.result.snackPerfect = !!order.snack;
+    }
+    return session;
+  },
+
 };

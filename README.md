@@ -22,15 +22,16 @@ Mở http://localhost:8080/ — không cần npm.
 4. **Nhận đơn** → pha / chuẩn bị → **Giao mang đi** hoặc **Bưng món** tới bàn.
 5. Khách tại chỗ ăn xong → trả sao → bàn **bẩn** → **Dọn bàn** (hoặc nhân viên làm hộ).
 6. Hết khách → kết ngày → chuyện tối → nâng cấp / nhập hàng / **thuê nhân viên** → ngày tiếp.
-7. Sau ngày 30: kết thúc (gồm số nhân viên) + Ván mới. Lưu `localStorage` **v3** (migrate từ v1/v2).
+7. Sau ngày 30: kết thúc (gồm số nhân viên) + Ván mới. Lưu `localStorage` **v4** (migrate từ v1/v2/v3).
 
 ## Nội dung chính
 
 - Đơn ngẫu nhiên mỗi khách: chỉ trà / chỉ snack / **combo** (trọng số theo ngày + menu đã mở)
 - **Tại chỗ** sit bàn · **Mang đi** lấy túi ở quầy
 - Bàn: trống / có khách / bẩn / đang dọn (2→~6 theo ngày + ghế)
-- Nhân viên: Thu ngân/pha chế · Phục vụ · Tạp vụ (lương/ngày, slot tăng dần)
+- Nhân viên (danh sách): Thu ngân · Pha chế · Phục vụ · Tạp vụ — thuê nhiều người cùng vai trò; bạn là quản lý
 - 6 đồ uống · 6 snack · 10 thiết bị Cấp 0→4 · walk animation · sao 1–5
+- **Quản lý**: thuê nhiều NV cùng role; barista tự pha; ưu tiên pha/dọn
 - Chuyện then chốt ngày 1, 3, 7, 14, 21, 30
 
 ## Cân bằng gợi ý
@@ -41,7 +42,7 @@ Mở http://localhost:8080/ — không cần npm.
 | Uy tín đầu | 2.5 / 5 |
 | Ngày | 1–30 |
 | Bàn | 2 (đầu) → ~6 |
-| NV | 0 slot ngày 1–2 · 1→3 sau đó |
+| NV | 0 (ngày 1–2) → ~1 → ~3–4 → ~6–8 (ngày + ghế/biển) |
 | Mục tiêu DT | ~55k → ~420k |
 | Khách/ngày | ~4 → ~12 (+ thiết bị) |
 
@@ -63,5 +64,6 @@ tra-sua-shop/
 
 - Không có asset ngoài emoji/CSS.
 - Combo prep nối tiếp (trà rồi snack).
-- Staff AI đơn giản (timer), chưa pathfinding.
+- Staff AI theo timer (nhiều NV cùng role = nhanh hơn / song song); barista tự pha.
+- Chưa pathfinding; quản lý chỉ có ưu tiên pha/dọn nhẹ.
 - Mobile chơi được; tối ưu quanh ≥900px.

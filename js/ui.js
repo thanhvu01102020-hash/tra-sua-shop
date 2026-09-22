@@ -244,16 +244,19 @@ const UI = {
   renderStaffSprites(state) {
     const box = document.getElementById("floor-staff");
     if (!box) return;
-    const staff = state.staff || {};
     if (!state.staffActive) {
       box.innerHTML = "";
       return;
     }
-    const bits = [];
-    if (staff.cashier) bits.push(`<span class="staff-sprite" title="Thu ngân">🧾</span>`);
-    if (staff.server) bits.push(`<span class="staff-sprite" title="Phục vụ">🍽️</span>`);
-    if (staff.janitor) bits.push(`<span class="staff-sprite" title="Tạp vụ">🧹</span>`);
-    box.innerHTML = bits.join("");
+    const list = normalizeStaffList(state.staff);
+    box.innerHTML = list
+      .map((e) => {
+        const r = staffRoleById(e.role);
+        const emoji = r ? r.emoji : "👤";
+        const label = (r ? r.name : e.role) + " · " + e.name;
+        return `<span class="staff-sprite" title="${label}"><span class="staff-emoji">${emoji}</span><span class="staff-tag">${e.name}</span></span>`;
+      })
+      .join("");
   },
 
   renderTables(state, handlers) {
@@ -1180,12 +1183,69 @@ const UI = {
   },
 
   /* ---------- UPGRADE + STOCK ---------- */
+  staffPanelHtml(state) {
+    const slots = maxStaffSlots(state.day, state.upgrades);
+    const list = normalizeStaffList(state.staff);
+    const hired = list.length;
+    const priority = state.staffPriority || "balanced";
+    const tip = managerTip(state.day, list, state.money, slots);
+    const roster = list.length
+      ? list
+          .map((e) => {
+            const r = staffRoleById(e.role);
+            return `<div class="staff-roster-row">
+              <span>${r ? r.emoji : "👤"} <b>${e.name}</b> · ${r ? r.name : e.role}
+                <span class="muted small">(${this.money(staffWage(e.role, state.day))}/ngày)</span>
+              </span>
+              <button type="button" class="btn btn-sm btn-ghost" data-fire="${e.id}">Cho nghỉ</button>
+            </div>`;
+          })
+          .join("")
+      : `<p class="muted small">Chưa có nhân viên — bạn đang tự làm mọi việc.</p>`;
+    const hireRows = STAFF_ROLES.map((r) => {
+      const locked = state.day < r.unlockDay;
+      const count = countRole(list, r.id);
+      const wage = staffWage(r, state.day);
+      const fee = Math.round(wage * 0.5);
+      let btn;
+      if (locked) btn = `<button type="button" class="btn btn-sm btn-ghost" disabled>Ngày ${r.unlockDay}</button>`;
+      else {
+        const full = hired >= slots;
+        btn = `<button type="button" class="btn btn-sm btn-secondary" data-hire="${r.id}" ${
+          full || state.money < fee ? "disabled" : ""
+        }>Thuê thêm · ${this.money(fee)}</button>`;
+      }
+      return `<div class="upgrade-row staff-row">
+        <div>
+          <div>${r.emoji} <b>${r.name}</b> ${count ? `<span class="level-pill">×${count}</span>` : ""}</div>
+          <div class="muted small">${r.blurb}</div>
+          <div class="muted small">Lương/ngày: <b>${this.money(wage)}</b></div>
+        </div>
+        ${btn}
+      </div>`;
+    }).join("");
+    const prio = STAFF_PRIORITY_OPTIONS.map((p) => {
+      const on = priority === p.id;
+      return `<button type="button" class="btn btn-sm ${on ? "btn-primary" : "btn-ghost"}" data-priority="${p.id}">${p.emoji} ${p.label}</button>`;
+    }).join(" ");
+    return `
+      <p class="muted small">Slot: <b>${hired}/${slots}</b> · Có thể thuê nhiều người cùng vai trò.
+        ${tip ? `<br/><span class="manager-tip">💡 ${tip}</span>` : ""}</p>
+      <h3 class="menu-sec">Đội ngũ hiện tại</h3>
+      <div class="staff-roster">${roster}</div>
+      <h3 class="menu-sec">Ưu tiên quản lý</h3>
+      <div class="staff-priority">${prio}</div>
+      <h3 class="menu-sec">Thuê thêm</h3>
+      <div class="staff-list">${hireRows}</div>
+    `;
+  },
+
   renderUpgrade(state, handlers) {
     this.clear();
     this.root.classList.add("screen-upgrade");
     const fx = getEffects(state.upgrades);
     const disc = fx.stockDiscount || 0;
-    const slots = maxStaffSlots(state.day);
+    const slots = maxStaffSlots(state.day, state.upgrades);
     const hired = staffCount(state.staff);
 
     const upRows = DEVICES.map((d) => {
@@ -1234,31 +1294,7 @@ const UI = {
         })
         .join("");
 
-    const staffRows = STAFF_ROLES.map((r) => {
-      const locked = state.day < r.unlockDay;
-      const on = !!(state.staff && state.staff[r.id]);
-      const wage = staffWage(r, state.day);
-      const fee = Math.round(wage * 0.5);
-      let btn = "";
-      if (locked) {
-        btn = `<button class="btn btn-sm btn-ghost" disabled>Ngày ${r.unlockDay}</button>`;
-      } else if (on) {
-        btn = `<button class="btn btn-sm btn-ghost" data-fire="${r.id}">Cho nghỉ</button>`;
-      } else {
-        const full = hired >= slots;
-        btn = `<button class="btn btn-sm btn-secondary" data-hire="${r.id}" ${
-          full || state.money < fee ? "disabled" : ""
-        }>Thuê · ${this.money(fee)}</button>`;
-      }
-      return `<div class="upgrade-row staff-row">
-        <div>
-          <div>${r.emoji} <b>${r.name}</b> ${on ? '<span class="level-pill">Đang làm</span>' : ""}</div>
-          <div class="muted small">${r.blurb}</div>
-          <div class="muted small">Lương/ngày: <b>${this.money(wage)}</b> (trừ lúc mở quán)</div>
-        </div>
-        ${btn}
-      </div>`;
-    }).join("");
+    const staffPanel = this.staffPanelHtml(state);
 
     const nextLabel =
       state.day >= GAME_CONFIG.totalDays
@@ -1278,9 +1314,8 @@ const UI = {
           <div class="upgrade-list">${upRows}</div>
         </div>
         <div class="card">
-          <h2>👥 Thuê nhân viên</h2>
-          <p class="muted small">Slot: <b>${hired}/${slots}</b> · Ngày 1–2 tự làm; nhân viên hữu ích khi bàn đông.</p>
-          <div class="staff-list">${staffRows || "<p class='muted'>Chưa mở thuê.</p>"}</div>
+          <h2>👥 Quản lý nhân viên</h2>
+          ${staffPanel}
           <h2 class="pad-top">🛒 Nhập hàng</h2>
           <h3 class="menu-sec">Nguyên liệu trà</h3>
           <div class="stock-list">${stockSection("drink")}</div>
@@ -1306,47 +1341,32 @@ const UI = {
     this.root.querySelectorAll("[data-fire]").forEach((btn) => {
       btn.onclick = () => handlers.fireStaff(btn.getAttribute("data-fire"));
     });
+    this.root.querySelectorAll("[data-priority]").forEach((btn) => {
+      if (handlers.setPriority) {
+        btn.onclick = () => handlers.setPriority(btn.getAttribute("data-priority"));
+      }
+    });
     document.getElementById("btn-next-day").onclick = handlers.nextDay;
   },
 
   renderStaffModal(state, handlers) {
-    const slots = maxStaffSlots(state.day);
-    const hired = staffCount(state.staff);
-    const rows = STAFF_ROLES.map((r) => {
-      const locked = state.day < r.unlockDay;
-      const on = !!(state.staff && state.staff[r.id]);
-      const wage = staffWage(r, state.day);
-      const fee = Math.round(wage * 0.5);
-      let action = "";
-      if (locked) action = `<span class="muted small">Mở ngày ${r.unlockDay}</span>`;
-      else if (on)
-        action = `<button class="btn btn-sm btn-ghost" data-fire="${r.id}">Cho nghỉ</button>`;
-      else
-        action = `<button class="btn btn-sm btn-secondary" data-hire="${r.id}" ${
-          hired >= slots || state.money < fee ? "disabled" : ""
-        }>Thuê · ${this.money(fee)}</button>`;
-      return `<div class="upgrade-row">
-        <div>
-          <div>${r.emoji} <b>${r.name}</b> ${on ? "✓" : ""}</div>
-          <div class="muted small">${r.blurb}</div>
-          <div class="muted small">Lương/ngày ${this.money(wage)}</div>
-        </div>
-        ${action}
-      </div>`;
-    }).join("");
-
     this.modal(`
-      <h2>👥 Nhân viên</h2>
-      <p class="muted small">Đang thuê ${hired}/${slots}. Lương trừ khi mở quán mỗi ngày.</p>
-      <div>${rows}</div>
-      <button class="btn btn-primary" id="modal-close">Đóng</button>
+      <h2>👥 Quản lý nhân viên</h2>
+      ${this.staffPanelHtml(state)}
+      <button type="button" class="btn btn-primary" id="modal-close">Đóng</button>
     `);
     document.getElementById("modal-close").onclick = handlers.close;
-    document.querySelectorAll("#modal-root-global [data-hire]").forEach((btn) => {
+    const root = document.getElementById("modal-root-global") || document;
+    root.querySelectorAll("[data-hire]").forEach((btn) => {
       btn.onclick = () => handlers.hireStaff(btn.getAttribute("data-hire"));
     });
-    document.querySelectorAll("#modal-root-global [data-fire]").forEach((btn) => {
+    root.querySelectorAll("[data-fire]").forEach((btn) => {
       btn.onclick = () => handlers.fireStaff(btn.getAttribute("data-fire"));
+    });
+    root.querySelectorAll("[data-priority]").forEach((btn) => {
+      if (handlers.setPriority) {
+        btn.onclick = () => handlers.setPriority(btn.getAttribute("data-priority"));
+      }
     });
   },
 
@@ -1382,8 +1402,10 @@ const UI = {
         </ul>
         <div class="staff-win">${
           STAFF_ROLES.map((r) => {
-            const on = state.staff && state.staff[r.id];
-            return `<span class="staff-chip ${on ? "on" : "off"}">${r.emoji} ${r.name}${on ? " ✓" : ""}</span>`;
+            const n = countRole(state.staff, r.id);
+            return `<span class="staff-chip ${n ? "on" : "off"}">${r.emoji} ${r.name}${
+              n ? " ×" + n : ""
+            }</span>`;
           }).join(" ")
         }</div>
         <details class="device-details">

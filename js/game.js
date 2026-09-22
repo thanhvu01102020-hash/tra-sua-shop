@@ -13,7 +13,8 @@ const Game = {
   muted: false,
   audioCtx: null,
   dayStats: null,
-  staffTimers: { take: 0, serve: 0, clean: 0, brewHelp: 0 },
+  staffTimers: { take: 0, serve: 0, clean: 0, brew: 0 },
+  staffBrewJobs: [],
   cleanJob: null, // { tableId, t, dur, by: 'player'|'staff' }
 
   boot() {
@@ -80,11 +81,15 @@ const Game = {
 
   effects() {
     const base = getEffects(this.state ? this.state.upgrades : {});
-    if (this.state && this.state.staff && this.state.staff.cashier && this.state.staffActive) {
-      base.brewTimeBonus = (base.brewTimeBonus || 0) + 4;
-      base.shakeSpeed = (base.shakeSpeed || 1) * 1.08;
-      base.blendSpeed = (base.blendSpeed || 1) * 1.08;
-      base.snackSpeed = (base.snackSpeed || 1) * 1.06;
+    if (this.state && this.state.staffActive) {
+      const nBar = countRole(this.state.staff, "barista");
+      if (nBar > 0) {
+        const boost = 1 + Math.min(0.2, nBar * 0.06);
+        base.brewTimeBonus = (base.brewTimeBonus || 0) + 2 * nBar;
+        base.shakeSpeed = (base.shakeSpeed || 1) * boost;
+        base.blendSpeed = (base.blendSpeed || 1) * boost;
+        base.snackSpeed = (base.snackSpeed || 1) * (1 + Math.min(0.15, nBar * 0.05));
+      }
     }
     return base;
   },
@@ -99,7 +104,18 @@ const Game = {
   },
 
   emptyStaff() {
-    return { cashier: false, server: false, janitor: false };
+    return [];
+  },
+
+  newEmployee(roleId) {
+    const role = staffRoleById(roleId);
+    if (!role) return null;
+    const list = normalizeStaffList(this.state ? this.state.staff : []);
+    return {
+      id: "e_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 6),
+      role: role.id,
+      name: pickStaffName(list),
+    };
   },
 
   freshState(shopName) {
@@ -116,6 +132,7 @@ const Game = {
       upgrades: this.emptyUpgrades(),
       staff: this.emptyStaff(),
       staffActive: true,
+      staffPriority: "balanced",
       flags: {},
       dayRevenue: 0,
       queue: [],
@@ -134,17 +151,21 @@ const Game = {
         daysPlayed: 0,
         peakStaff: 0,
       },
-      saveVersion: 3,
+      saveVersion: 4,
     };
   },
 
   migrateSaveIfNeeded() {
     try {
-      const v3 = localStorage.getItem(GAME_CONFIG.saveKey);
-      if (v3) return;
+      const v4 = localStorage.getItem(GAME_CONFIG.saveKey);
+      if (v4) return;
 
-      let raw = localStorage.getItem(GAME_CONFIG.saveKeyLegacyV2);
-      let from = 2;
+      let raw = localStorage.getItem(GAME_CONFIG.saveKeyLegacyV3);
+      let from = 3;
+      if (!raw) {
+        raw = localStorage.getItem(GAME_CONFIG.saveKeyLegacyV2);
+        from = 2;
+      }
       if (!raw) {
         raw = localStorage.getItem(GAME_CONFIG.saveKeyLegacy);
         from = 1;
@@ -155,6 +176,7 @@ const Game = {
 
       if (old.won3day || old.won || (old.flags && old.flags.mvp_win)) {
         try {
+          localStorage.removeItem(GAME_CONFIG.saveKeyLegacyV3);
           localStorage.removeItem(GAME_CONFIG.saveKeyLegacyV2);
           localStorage.removeItem(GAME_CONFIG.saveKeyLegacy);
         } catch (_) {}
@@ -190,16 +212,13 @@ const Game = {
       migrated.upgrades = ups;
       migrated.lifetime = old.lifetime || migrated.lifetime;
       migrated.muted = !!old.muted;
-      if (old.staff) {
-        migrated.staff = {
-          cashier: !!old.staff.cashier,
-          server: !!old.staff.server,
-          janitor: !!old.staff.janitor,
-        };
-      }
+      migrated.staff = normalizeStaffList(old.staff);
+      migrated.staffPriority = old.staffPriority || "balanced";
+      migrated.saveVersion = 4;
 
       localStorage.setItem(GAME_CONFIG.saveKey, JSON.stringify(this.serialize(migrated, false)));
       try {
+        localStorage.removeItem(GAME_CONFIG.saveKeyLegacyV3);
         localStorage.removeItem(GAME_CONFIG.saveKeyLegacyV2);
         localStorage.removeItem(GAME_CONFIG.saveKeyLegacy);
       } catch (_) {}
@@ -208,14 +227,15 @@ const Game = {
 
   serialize(state, midDay) {
     return {
-      saveVersion: 3,
+      saveVersion: 4,
       shopName: state.shopName,
       day: state.day,
       money: state.money,
       rep: state.rep,
       inventory: state.inventory,
       upgrades: state.upgrades,
-      staff: state.staff || this.emptyStaff(),
+      staff: normalizeStaffList(state.staff),
+      staffPriority: state.staffPriority || "balanced",
       flags: state.flags,
       muted: this.muted,
       midDay: !!midDay,
@@ -239,10 +259,8 @@ const Game = {
   load() {
     try {
       let raw = localStorage.getItem(GAME_CONFIG.saveKey);
-      if (!raw) {
-        // try v2 still present
-        raw = localStorage.getItem(GAME_CONFIG.saveKeyLegacyV2);
-      }
+      if (!raw) raw = localStorage.getItem(GAME_CONFIG.saveKeyLegacyV3);
+      if (!raw) raw = localStorage.getItem(GAME_CONFIG.saveKeyLegacyV2);
       if (!raw) return null;
       const data = JSON.parse(raw);
       if (!data) return null;
@@ -279,12 +297,8 @@ const Game = {
         }
       });
     }
-    const staff = this.emptyStaff();
-    if (data.staff) {
-      staff.cashier = !!data.staff.cashier;
-      staff.server = !!data.staff.server;
-      staff.janitor = !!data.staff.janitor;
-    }
+    const staff = normalizeStaffList(data.staff);
+    const staffPriority = data.staffPriority || "balanced";
     Object.assign(this.state, {
       day: Math.max(1, Math.min(GAME_CONFIG.totalDays, data.day || 1)),
       money: data.money,
@@ -292,9 +306,10 @@ const Game = {
       inventory: { ...this.state.inventory, ...(data.inventory || {}) },
       upgrades: ups,
       staff,
+      staffPriority,
       flags: data.flags || {},
       lifetime: data.lifetime || this.state.lifetime,
-      saveVersion: 3,
+      saveVersion: 4,
     });
     Object.keys(INGREDIENTS).forEach((k) => {
       if (this.state.inventory[k] == null) this.state.inventory[k] = INGREDIENTS[k].stock;
@@ -434,35 +449,43 @@ const Game = {
   },
 
   payStaffWages() {
-    const staff = this.state.staff || this.emptyStaff();
-    let total = 0;
-    const working = [];
-    STAFF_ROLES.forEach((role) => {
-      if (staff[role.id]) {
-        const w = staffWage(role, this.state.day);
-        total += w;
-        working.push({ role, wage: w });
-      }
-    });
-    if (!working.length) {
+    let staff = normalizeStaffList(this.state.staff);
+    this.state.staff = staff;
+    if (!staff.length) {
       this.state.staffActive = true;
+      this.staffBrewJobs = [];
       return;
     }
-    if (this.state.money < total) {
-      // fire all if can't pay
-      working.forEach((w) => {
-        this.state.staff[w.role.id] = false;
-      });
-      this.state.staffActive = false;
-      UI.toast("Không đủ tiền trả lương — nhân viên nghỉ việc hôm nay!", "bad");
+    let total = totalStaffWages(staff, this.state.day);
+    const fired = [];
+    while (staff.length && this.state.money < total) {
+      const ordered = sortEmployeesForFire(staff);
+      const victim = ordered[0];
+      staff = staff.filter((e) => e.id !== victim.id);
+      fired.push(victim);
+      total = totalStaffWages(staff, this.state.day);
+    }
+    this.state.staff = staff;
+    if (fired.length) {
+      const names = fired
+        .map((e) => {
+          const r = staffRoleById(e.role);
+          return (r ? r.emoji : "?") + " " + e.name;
+        })
+        .join(", ");
+      UI.toast("Không đủ tiền trả lương — cho nghỉ: " + names, "bad");
       this.sfxBad();
+    }
+    if (!staff.length) {
+      this.state.staffActive = false;
+      this.staffBrewJobs = [];
       return;
     }
     this.state.money -= total;
     this.state.staffActive = true;
-    const names = working.map((w) => w.role.emoji + " −" + UI.money(w.wage)).join(" · ");
-    UI.toast("Lương nhân viên: " + names, "info");
-    const cnt = staffCount(this.state.staff);
+    if (this.dayStats) this.dayStats.wages = total;
+    UI.toast("Lương NV (" + staff.length + "): " + UI.money(total), "info");
+    const cnt = staffCount(staff);
     if (this.state.lifetime) {
       this.state.lifetime.peakStaff = Math.max(this.state.lifetime.peakStaff || 0, cnt);
     }
@@ -478,9 +501,14 @@ const Game = {
     this.state.shopOpen = true;
     this.state.tables = this.buildTables();
     this.cleanJob = null;
-    this.staffTimers = { take: 1.5, serve: 2, clean: 2.5, brewHelp: 0 };
+    this.staffTimers = { take: 1.5, serve: 2, clean: 2.5, brew: 0.8 };
+    this.staffBrewJobs = [];
 
     this.payStaffWages();
+
+    const tipSlots = maxStaffSlots(this.state.day, this.state.upgrades);
+    const tip = managerTip(this.state.day, this.state.staff, this.state.money, tipSlots);
+    if (tip) setTimeout(() => UI.toast(tip, "info"), 600);
 
     const fx = this.effects();
     let count = baseCustomers(this.state.day) + fx.extraCustomers;
@@ -1241,79 +1269,147 @@ const Game = {
   /* ---------- STAFF AI ---------- */
   tickStaff(dt) {
     if (!this.state.staffActive) return false;
-    const staff = this.state.staff || {};
-    if (!staff.cashier && !staff.server && !staff.janitor) return false;
+    const staff = normalizeStaffList(this.state.staff);
+    this.state.staff = staff;
+    if (!staff.length) return false;
     let changed = false;
+    const priority = this.state.staffPriority || "balanced";
+    const nCashier = countRole(staff, "cashier");
+    const nServer = countRole(staff, "server");
+    const nCleaner = countRole(staff, "cleaner");
+    const nBarista = countRole(staff, "barista");
+    const interval = (base, n, min) => Math.max(min, base / Math.sqrt(Math.max(1, n)));
 
-    if (staff.cashier) {
+    // Cashier: accept orders (takeaway handoff moved to server)
+    if (nCashier > 0) {
       this.staffTimers.take -= dt;
       if (this.staffTimers.take <= 0) {
-        this.staffTimers.take = 2.8 + Math.random() * 1.5;
+        this.staffTimers.take = interval(2.6, nCashier, 1.1) + Math.random() * 0.8;
         if (!this.state.currentCustomer && this.stateName === "SHOP") {
           const tw = this.takeawayWaiting();
           if (tw.length) {
             this.takeOrder(tw[0].id);
             UI.toast("🧾 Thu ngân nhận đơn mang đi", "info");
+            changed = true;
           } else {
             const di = this.dineInNeedingOrder();
-            if (di.length && Math.random() < 0.45) {
+            if (di.length) {
               this.takeOrder(di[0].id);
               UI.toast("🧾 Thu ngân nhận đơn bàn", "info");
+              changed = true;
             }
           }
         }
-        // auto complete takeaway pickup if ready
-        const readyTw = this.state.readyTray.find((t) => t.service === "takeaway");
-        if (readyTw && !this.state.currentCustomer) {
+      }
+    }
+
+    // Barista: auto-brew in parallel (slots = barista count)
+    if (nBarista > 0 && this.stateName === "SHOP") {
+      if (!this.staffBrewJobs) this.staffBrewJobs = [];
+      while (this.staffBrewJobs.length < nBarista) {
+        const cust = this.state.currentCustomer;
+        if (!cust || this.brewSession) break;
+        const order = cust.order;
+        const dur = baristaBrewDuration(order, this.state.upgrades, nBarista);
+        const adj = priority === "brew" ? 0.85 : priority === "clean" ? 1.1 : 1;
+        const busy = new Set(this.staffBrewJobs.map((j) => j.empId));
+        const emp =
+          employeesOfRole(staff, "barista").find((e) => !busy.has(e.id)) ||
+          employeesOfRole(staff, "barista")[0];
+        this.staffBrewJobs.push({
+          empId: emp.id,
+          empName: emp.name,
+          customerId: cust.id,
+          t: 0,
+          dur: dur * adj,
+          order,
+          service: cust.service,
+          tableId: cust.tableId,
+        });
+        cust.phase = "waiting_brew";
+        cust.mood = "wait";
+        if (!this.state.queue.find((c) => c.id === cust.id)) this.state.queue.push(cust);
+        if (cust.service === "takeaway") {
+          cust.pos = 0.82;
+          cust.targetPos = 0.82;
+        }
+        this.state.currentCustomer = null;
+        UI.toast("🧋 " + emp.name + " đang pha chế…", "info");
+        changed = true;
+      }
+      const still = [];
+      this.staffBrewJobs.forEach((job) => {
+        job.t += dt;
+        if (job.t >= job.dur) {
+          this.finishStaffBrew(job);
+          changed = true;
+        } else still.push(job);
+      });
+      this.staffBrewJobs = still;
+    }
+
+    // Server: deliver, takeaway handoff, seat, soft-clean if no cleaner
+    if (nServer > 0) {
+      this.staffTimers.serve -= dt;
+      if (this.staffTimers.serve <= 0) {
+        this.staffTimers.serve = interval(3.0, nServer, 1.2) + Math.random() * 1.2;
+        const readyDi = this.state.readyTray.find((x) => x.service === "dinein");
+        const readyTw = this.state.readyTray.find((x) => x.service === "takeaway");
+        if (readyDi) {
+          this.deliverToTable(readyDi.tableId, readyDi.id);
+          UI.toast("🍽️ Phục vụ bưng món", "info");
+          changed = true;
+        } else if (readyTw) {
           const c = this.state.queue.find(
             (x) => x.id === readyTw.customerId && x.phase === "waiting_pickup"
           );
           if (c) {
             this.completeTakeaway(readyTw);
-            UI.toast("🧾 Giao túi mang đi", "info");
+            UI.toast("🍽️ Phục vụ giao túi mang đi", "info");
+            changed = true;
           }
-        }
-      }
-    }
-
-    if (staff.server) {
-      this.staffTimers.serve -= dt;
-      if (this.staffTimers.serve <= 0) {
-        this.staffTimers.serve = 3.2 + Math.random() * 1.8;
-        const readyDi = this.state.readyTray.find((t) => t.service === "dinein");
-        if (readyDi) {
-          this.deliverToTable(readyDi.tableId, readyDi.id);
-          UI.toast("🍽️ Phục vụ bưng món", "info");
-        } else if (!staff.janitor) {
-          // soft clean one dirty table slowly
-          const dirty = this.state.tables.find((t) => t.status === "dirty");
+        } else if (nCleaner === 0 && priority !== "brew") {
+          const dirty = this.state.tables.find((x) => x.status === "dirty");
           if (dirty && !this.cleanJob) {
             dirty.status = "cleaning";
             this.cleanJob = {
               tableId: dirty.id,
               t: 0,
-              dur: GAME_CONFIG.cleanDuration * 1.6,
+              dur: GAME_CONFIG.cleanDuration * 1.55,
               by: "staff",
             };
             UI.toast("🍽️ Phục vụ dọn bàn", "info");
             changed = true;
           }
+        } else {
+          const waiter = this.state.queue.find((c) => c.phase === "waiting_table");
+          if (waiter) {
+            const table = this.freeTable();
+            if (table) {
+              this.seatAtTable(waiter, table);
+              UI.toast("🍽️ Phục vụ xếp bàn", "info");
+              changed = true;
+            }
+          }
         }
       }
     }
 
-    if (staff.janitor) {
+    // Cleaner
+    if (nCleaner > 0) {
       this.staffTimers.clean -= dt;
+      const cleanBoost = priority === "clean" ? 0.75 : priority === "brew" ? 1.15 : 1;
       if (this.staffTimers.clean <= 0) {
-        this.staffTimers.clean = 2.4 + Math.random();
+        this.staffTimers.clean =
+          interval(2.2, nCleaner, 0.9) * cleanBoost + Math.random() * 0.6;
         if (!this.cleanJob) {
-          const dirty = this.state.tables.find((t) => t.status === "dirty");
+          const dirty = this.state.tables.find((x) => x.status === "dirty");
           if (dirty) {
             dirty.status = "cleaning";
             this.cleanJob = {
               tableId: dirty.id,
               t: 0,
-              dur: GAME_CONFIG.cleanDuration * 0.85,
+              dur: GAME_CONFIG.cleanDuration * 0.8 * cleanBoost,
               by: "staff",
             };
             UI.toast("🧹 Tạp vụ dọn bàn", "info");
@@ -1324,6 +1420,44 @@ const Game = {
     }
     return changed;
   },
+
+  finishStaffBrew(job) {
+    const customer =
+      this.state.queue.find((c) => c.id === job.customerId) ||
+      (this.state.currentCustomer && this.state.currentCustomer.id === job.customerId
+        ? this.state.currentCustomer
+        : null);
+    if (!customer) return;
+    let session;
+    try {
+      session = Brew.autoPerfect(job.order, this.state.upgrades, job.dur);
+    } catch (e) {
+      session = null;
+    }
+    if (!session || !session.result) {
+      UI.toast("🧋 Pha chế lỗi — cần bạn hỗ trợ", "bad");
+      if (!this.state.currentCustomer) {
+        this.state.currentCustomer = customer;
+        customer.phase = "serving";
+        this.state.queue = this.state.queue.filter((c) => c.id !== customer.id);
+      }
+      return;
+    }
+    Brew.consumeStock(this.state.inventory, session);
+    const result = session.result;
+    // Temporarily set currentCustomer so resolveServe can run, then clear brewSession
+    const prev = this.state.currentCustomer;
+    const prevBrew = this.brewSession;
+    this.state.currentCustomer = customer;
+    this.brewSession = null;
+    this.state.queue = this.state.queue.filter((c) => c.id !== customer.id);
+    this.resolveServe(result);
+    if (prev && prev.id !== customer.id) {
+      // shouldn't happen; leave as resolveServe cleared current
+    }
+    UI.toast("🧋 " + (job.empName || "Pha chế") + " xong món!", "good");
+  },
+
 
   /* ---------- DAY END ---------- */
   endDay() {
@@ -1398,7 +1532,8 @@ const Game = {
       buyUpgrade: (id) => this.buyUpgrade(id),
       buyStock: (id, qty) => this.buyStock(id, qty),
       hireStaff: (roleId) => this.hireStaff(roleId),
-      fireStaff: (roleId) => this.fireStaff(roleId),
+      fireStaff: (id) => this.fireStaff(id),
+      setPriority: (id) => this.setStaffPriority(id),
       nextDay: () => this.advanceDay(),
     });
   },
@@ -1408,61 +1543,92 @@ const Game = {
       hireStaff: (roleId) => {
         this.hireStaff(roleId);
         UI.closeModal();
-        if (this.stateName === "UPGRADE") this.renderUpgrade();
-        else this.renderShop();
+        this.renderStaffModal();
       },
-      fireStaff: (roleId) => {
-        this.fireStaff(roleId);
+      fireStaff: (id) => {
+        this.fireStaff(id);
         UI.closeModal();
-        if (this.stateName === "UPGRADE") this.renderUpgrade();
-        else this.renderShop();
+        this.renderStaffModal();
+      },
+      setPriority: (id) => {
+        this.setStaffPriority(id);
+        UI.closeModal();
+        this.renderStaffModal();
       },
       close: () => UI.closeModal(),
     });
   },
 
   hireStaff(roleId) {
-    const role = STAFF_ROLES.find((r) => r.id === roleId);
+    const role = staffRoleById(roleId);
     if (!role) return;
     if (this.state.day < role.unlockDay) {
-      UI.toast(`Mở từ ngày ${role.unlockDay}`, "bad");
+      UI.toast("Mở từ ngày " + role.unlockDay, "bad");
       this.sfxBad();
       return;
     }
-    if (this.state.staff[roleId]) {
-      UI.toast("Đã thuê rồi", "info");
-      return;
-    }
-    const slots = maxStaffSlots(this.state.day);
-    if (staffCount(this.state.staff) >= slots) {
-      UI.toast(`Tối đa ${slots} nhân viên ở giai đoạn này`, "bad");
+    const staff = normalizeStaffList(this.state.staff);
+    const slots = maxStaffSlots(this.state.day, this.state.upgrades);
+    if (staff.length >= slots) {
+      UI.toast("Tối đa " + slots + " nhân viên ở giai đoạn này", "bad");
       this.sfxBad();
       return;
     }
-    // hiring fee = half day wage
     const fee = Math.round(staffWage(role, this.state.day) * 0.5);
     if (this.state.money < fee) {
       UI.toast("Không đủ tiền đặt cọc thuê", "bad");
       this.sfxBad();
       return;
     }
+    const emp = this.newEmployee(role.id);
+    if (!emp) return;
     this.state.money -= fee;
-    this.state.staff[roleId] = true;
+    staff.push(emp);
+    this.state.staff = staff;
+    this.state.staffActive = true;
     this.sfxCoin();
-    UI.toast(`Đã thuê ${role.emoji} ${role.name} (−${UI.money(fee)})`, "good");
+    UI.toast(
+      "Thuê " + role.emoji + " " + emp.name + " (" + role.name + ") −" + UI.money(fee),
+      "good"
+    );
+    if (this.state.lifetime) {
+      this.state.lifetime.peakStaff = Math.max(
+        this.state.lifetime.peakStaff || 0,
+        staff.length
+      );
+    }
     this.save();
     if (this.stateName === "UPGRADE") this.renderUpgrade();
   },
 
-  fireStaff(roleId) {
-    const role = STAFF_ROLES.find((r) => r.id === roleId);
-    if (!role || !this.state.staff[roleId]) return;
-    this.state.staff[roleId] = false;
+  fireStaff(empIdOrRole) {
+    let staff = normalizeStaffList(this.state.staff);
+    let emp = staff.find((e) => e.id === empIdOrRole);
+    if (!emp) {
+      const role = STAFF_ROLE_ALIAS[empIdOrRole] || empIdOrRole;
+      emp = staff.find((e) => e.role === role);
+    }
+    if (!emp) return;
+    const role = staffRoleById(emp.role);
+    staff = staff.filter((e) => e.id !== emp.id);
+    this.state.staff = staff;
     this.sfxClick();
-    UI.toast(`Đã cho nghỉ ${role.emoji} ${role.name}`, "info");
+    UI.toast("Cho nghỉ " + (role ? role.emoji + " " : "") + emp.name, "info");
     this.save();
     if (this.stateName === "UPGRADE") this.renderUpgrade();
   },
+
+  setStaffPriority(id) {
+    if (!STAFF_PRIORITY_OPTIONS.find((p) => p.id === id)) return;
+    this.state.staffPriority = id;
+    UI.toast(
+      "Ưu tiên: " + STAFF_PRIORITY_OPTIONS.find((p) => p.id === id).label,
+      "info"
+    );
+    this.save();
+    if (this.stateName === "UPGRADE") this.renderUpgrade();
+  },
+
 
   buyUpgrade(id) {
     const device = DEVICES.find((x) => x.id === id);
@@ -1629,6 +1795,8 @@ const Game = {
       } else if (c.phase === "waiting_pickup") {
         // patience while waiting for bag
         c.patience -= dt * 0.35;
+      } else if (c.phase === "waiting_brew") {
+        c.patience -= dt * 0.3;
       } else if (c.phase === "waiting_food" || c.phase === "seated_ready") {
         c.patience -= dt * 0.4;
       }
@@ -1657,7 +1825,8 @@ const Game = {
         c.phase === "waiting_table" ||
         c.phase === "seated_ready" ||
         c.phase === "waiting_food" ||
-        c.phase === "waiting_pickup"
+        c.phase === "waiting_pickup" ||
+        c.phase === "waiting_brew"
       ) {
         if (c.phase === "waiting") c.patience -= dt;
         if (c.patience <= 0) leftIds.push(c.id);
