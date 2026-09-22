@@ -13,6 +13,7 @@ const Game = {
   muted: false,
   audioCtx: null,
   dayStats: null,
+  _floorDirty: false,
 
   /* ---------- BOOT ---------- */
   boot() {
@@ -93,6 +94,7 @@ const Game = {
       flags: {},
       dayRevenue: 0,
       queue: [],
+      departing: [],
       currentCustomer: null,
       customersLeft: 0,
       spawnTimer: 0,
@@ -111,7 +113,6 @@ const Game = {
       upgrades: this.state.upgrades,
       flags: this.state.flags,
       muted: this.muted,
-      // save between days mostly — if mid-shop, save day progress lightly
       midDay: this.stateName === "SHOP" || this.stateName === "BREW",
       dayRevenue: this.state.dayRevenue,
     };
@@ -185,7 +186,6 @@ const Game = {
       flags: data.flags || {},
     });
     this.muted = !!data.muted;
-    // Resume at morning of current day (safe)
     this.startDayMorning();
   },
 
@@ -239,7 +239,6 @@ const Game = {
     if (this.storyPhase === "morning") {
       this.openShop();
     } else {
-      // evening -> upgrade
       this.goUpgrade();
     }
   },
@@ -248,6 +247,7 @@ const Game = {
     this.stateName = "SHOP";
     this.state.dayRevenue = 0;
     this.state.queue = [];
+    this.state.departing = [];
     this.state.currentCustomer = null;
     this.state.shopOpen = true;
 
@@ -257,11 +257,9 @@ const Game = {
       count += this.state.flags._bonusCustomers;
       this.state.flags._bonusCustomers = 0;
     }
-    // mai_help lingering tiny bonus day 2+
-    if (this.state.flags.mai_help && this.state.day >= 2) count += 0; // already applied via choice once
 
     this.state.customersLeft = count;
-    this.state.spawnTimer = 1.5; // first customer soon
+    this.state.spawnTimer = 1.5;
 
     this.dayStats = {
       served: 0,
@@ -271,6 +269,8 @@ const Game = {
       tips: 0,
       revenue: 0,
       repStart: this.state.rep,
+      starSum: 0,
+      starCount: 0,
     };
 
     this.renderShop();
@@ -278,7 +278,7 @@ const Game = {
 
   renderShop() {
     UI.renderShop(this.state, {
-      takeOrder: (i) => this.takeOrder(i),
+      takeOrder: (id) => this.takeOrder(id),
       startBrew: () => this.startBrew(),
       cancelOrder: () => this.cancelOrder(),
       openRecipes: () => {
@@ -294,32 +294,47 @@ const Game = {
     });
   },
 
+  floorCount() {
+    return (
+      this.state.queue.length +
+      this.state.departing.length +
+      (this.state.currentCustomer ? 1 : 0)
+    );
+  },
+
+  waitingCustomers() {
+    return this.state.queue.filter((c) => c.phase === "waiting");
+  },
+
   /* ---------- CUSTOMERS ---------- */
   spawnCustomer() {
     const unlocked = RECIPES.filter((r) => r.unlockDay <= this.state.day);
     const recipe = { ...unlocked[Math.floor(Math.random() * unlocked.length)] };
 
-    // inject NPCs on certain slots
     let name = CUSTOMER_NAMES[Math.floor(Math.random() * CUSTOMER_NAMES.length)];
     let emoji = CUSTOMER_EMOJIS[Math.floor(Math.random() * CUSTOMER_EMOJIS.length)];
     let isNPC = false;
     let npcRole = "";
-    const served = this.dayStats.served + this.state.queue.length + (this.state.currentCustomer ? 1 : 0);
+    const arrivedOrServing =
+      this.dayStats.served +
+      this.dayStats.left +
+      this.state.queue.length +
+      this.state.departing.length +
+      (this.state.currentCustomer ? 1 : 0);
 
-    if (this.state.day === 1 && served === 1) {
+    if (this.state.day === 1 && arrivedOrServing === 1) {
       name = NPCS.mai.name;
       emoji = NPCS.mai.emoji;
       isNPC = true;
       npcRole = NPCS.mai.role;
-    } else if (this.state.day === 2 && served === 0) {
+    } else if (this.state.day === 2 && arrivedOrServing === 0) {
       name = NPCS.linh.name;
       emoji = NPCS.linh.emoji;
       isNPC = true;
       npcRole = NPCS.linh.role;
-      // Linh prefers matcha
       const matcha = RECIPES.find((r) => r.id === "matcha_latte");
       if (matcha) Object.assign(recipe, { ...matcha });
-    } else if (this.state.day >= 2 && served === 2) {
+    } else if (this.state.day >= 2 && arrivedOrServing === 2) {
       name = NPCS.anh.name;
       emoji = NPCS.anh.emoji;
       isNPC = true;
@@ -327,6 +342,10 @@ const Game = {
     }
 
     const maxP = GAME_CONFIG.customerPatienceBase + (this.state.rep - 2.5) * 4;
+    const walkDur =
+      WALK_CONFIG.inMin + Math.random() * (WALK_CONFIG.inMax - WALK_CONFIG.inMin);
+    const lineSlot = this.state.queue.filter((c) => c.phase !== "walking_out").length;
+
     const customer = {
       id: "c_" + Date.now() + "_" + Math.random().toString(36).slice(2, 6),
       name,
@@ -336,28 +355,143 @@ const Game = {
       patience: maxP,
       maxPatience: maxP,
       order: { recipe: { ...recipe } },
+      phase: "walking_in",
+      walkT: 0,
+      walkDur,
+      lineSlot,
+      pos: 0, // 0 = door, 1 = counter line
+      targetPos: this.slotPos(lineSlot),
+      mood: "walk",
     };
     this.state.queue.push(customer);
     this.state.customersLeft--;
   },
 
-  takeOrder(index) {
+  slotPos(slot) {
+    // Counter line: front near bar (~0.72), stack leftward a bit
+    return Math.max(0.42, 0.78 - slot * 0.09);
+  },
+
+  reindexLineSlots() {
+    let i = 0;
+    this.state.queue.forEach((c) => {
+      if (c.phase === "waiting" || c.phase === "walking_in") {
+        c.lineSlot = i;
+        c.targetPos = this.slotPos(i);
+        i++;
+      }
+    });
+  },
+
+  takeOrder(idOrIndex) {
     if (this.state.currentCustomer) return;
-    if (index !== 0) return;
+    const waiting = this.waitingCustomers();
+    if (!waiting.length) return;
+
+    let customer = null;
+    if (typeof idOrIndex === "string") {
+      customer = waiting.find((c) => c.id === idOrIndex) || null;
+      // only allow front of waiting line
+      if (customer && waiting[0].id !== customer.id) return;
+    } else {
+      customer = waiting[0];
+    }
+    if (!customer) return;
+
     this.sfxClick();
-    this.state.currentCustomer = this.state.queue.shift();
+    this.state.queue = this.state.queue.filter((c) => c.id !== customer.id);
+    customer.phase = "serving";
+    customer.mood = "order";
+    customer.pos = 0.88;
+    customer.targetPos = 0.88;
+    this.state.currentCustomer = customer;
+    this.reindexLineSlots();
     this.renderShop();
+  },
+
+  beginDepart(customer, reason) {
+    if (!customer) return;
+    customer.phase = "walking_out";
+    customer.mood = reason === "angry" || reason === "left" ? "angry" : "happy";
+    customer.walkT = 0;
+    customer.walkDur =
+      WALK_CONFIG.outMin + Math.random() * (WALK_CONFIG.outMax - WALK_CONFIG.outMin);
+    customer.targetPos = 0;
+    customer.exitReason = reason;
+    this.state.departing.push(customer);
   },
 
   cancelOrder() {
     if (!this.state.currentCustomer) return;
     this.sfxBad();
-    this.state.rep = Math.max(0.5, this.state.rep - 0.3);
-    this.dayStats.wrong++;
+    const c = this.state.currentCustomer;
     this.state.currentCustomer = null;
+    const stars = 1;
+    const repDelta = this.applyStarRep(stars);
+    this.dayStats.wrong++;
+    this.recordStars(stars);
+    this.beginDepart(c, "angry");
     UI.toast("Đã huỷ đơn (−uy tín)", "bad");
     this.renderShop();
     this.save();
+    UI.renderServeResult(
+      {
+        quality: "wrong",
+        payText: "Huỷ đơn",
+        stars,
+        repDelta,
+        flavor: this.starFlavor(stars),
+        starDisplay: this.starString(stars),
+      },
+      () => {
+        UI.closeModal();
+        this.renderShop();
+      }
+    );
+  },
+
+  /* ---------- STARS ---------- */
+  calcStars(result, customer) {
+    if (!result || result.quality === "left") return 1;
+    const patienceRatio = customer
+      ? Math.max(0, customer.patience / customer.maxPatience)
+      : 0.5;
+    const slow = result.elapsed > GAME_CONFIG.brewTimeLimit || !result.fast;
+
+    if (result.quality === "perfect") {
+      if (result.fast && patienceRatio > 0.35) return 5;
+      if (result.fast || patienceRatio > 0.5) return 4;
+      return 4;
+    }
+    if (result.quality === "ok") {
+      if (!slow && patienceRatio > 0.4) return 4;
+      return 3;
+    }
+    // wrong
+    return patienceRatio > 0.5 ? 2 : 1;
+  },
+
+  applyStarRep(stars) {
+    const map = { 5: 0.2, 4: 0.12, 3: 0.05, 2: -0.1, 1: -0.25 };
+    const delta = map[stars] != null ? map[stars] : 0;
+    const before = this.state.rep;
+    this.state.rep = Math.max(0.5, Math.min(GAME_CONFIG.maxRep, this.state.rep + delta));
+    return this.state.rep - before;
+  },
+
+  recordStars(stars) {
+    if (!this.dayStats) return;
+    this.dayStats.starSum += stars;
+    this.dayStats.starCount += 1;
+  },
+
+  starFlavor(stars) {
+    const list = STAR_FLAVOR[stars] || STAR_FLAVOR[3];
+    return list[Math.floor(Math.random() * list.length)];
+  },
+
+  starString(n) {
+    return "★".repeat(n) + "☆".repeat(Math.max(0, 5 - n));
   },
 
   /* ---------- BREW ---------- */
@@ -424,30 +558,31 @@ const Game = {
     let quality = result.quality;
     let payText = "";
 
+    const stars = this.calcStars(result, customer);
+
     if (quality === "perfect") {
       pay = price;
       if (Math.random() < GAME_CONFIG.tipChance + (result.fast ? 0.2 : 0) || result.extraToppingBonus) {
         tip = Math.round(price * GAME_CONFIG.tipRate);
       }
       if (result.extraToppingBonus) tip += 3000;
-      this.state.rep = Math.min(GAME_CONFIG.maxRep, this.state.rep + 0.15);
       this.dayStats.perfect++;
       this.sfxOk();
       this.sfxCoin();
       payText = `+${UI.money(pay)}${tip ? " + tip " + UI.money(tip) : ""}`;
     } else if (quality === "ok") {
       pay = Math.round(price * 0.7);
-      this.state.rep = Math.min(GAME_CONFIG.maxRep, this.state.rep + 0.05);
-      this.dayStats.served;
       this.sfxOk();
       payText = `+${UI.money(pay)} (giảm vì gần đúng)`;
     } else {
       pay = 0;
-      this.state.rep = Math.max(0.5, this.state.rep - 0.25);
       this.dayStats.wrong++;
       this.sfxBad();
       payText = "Hoàn tiền · −uy tín";
     }
+
+    const repDelta = this.applyStarRep(stars);
+    this.recordStars(stars);
 
     if (quality !== "wrong") this.dayStats.served++;
     this.state.money += pay + tip;
@@ -458,22 +593,36 @@ const Game = {
     this.state.currentCustomer = null;
     this.brewSession = null;
     this.stateName = "SHOP";
+    this.beginDepart(customer, quality === "wrong" ? "angry" : "served");
 
-    UI.renderServeResult({ quality, payText }, () => {
-      UI.closeModal();
-      this.renderShop();
-      this.save();
-      this.checkDayDone();
-    });
+    // Render shop first so floor shows walk-out; modal mounts after into #modal-root
+    this.renderShop();
+    UI.renderServeResult(
+      {
+        quality,
+        payText,
+        stars,
+        repDelta,
+        flavor: this.starFlavor(stars),
+        starDisplay: this.starString(stars),
+      },
+      () => {
+        UI.closeModal();
+        this.renderShop();
+        this.save();
+        this.checkDayDone();
+      }
+    );
   },
 
   checkDayDone() {
     if (
       this.state.customersLeft <= 0 &&
       this.state.queue.length === 0 &&
+      this.state.departing.length === 0 &&
       !this.state.currentCustomer
     ) {
-      // auto prompt end — UI already shows button
+      // UI shows end-day button
     }
   },
 
@@ -483,12 +632,16 @@ const Game = {
     this.stateName = "DAY_END";
     const goal = GAME_CONFIG.dayGoals[this.state.day - 1] || 150000;
     const repDelta = this.state.rep - this.dayStats.repStart;
-    // mild goal bonus
     if (this.state.dayRevenue >= goal) {
       this.state.rep = Math.min(GAME_CONFIG.maxRep, this.state.rep + 0.2);
       this.state.money += 10000;
       UI.toast("Đạt mục tiêu! +10.000đ thưởng", "good");
     }
+
+    const avgStars =
+      this.dayStats.starCount > 0
+        ? this.dayStats.starSum / this.dayStats.starCount
+        : 0;
 
     this.save();
     UI.renderDayEnd(
@@ -504,6 +657,8 @@ const Game = {
         rep: this.state.rep,
         repDelta,
         money: this.state.money,
+        avgStars,
+        starCount: this.dayStats.starCount,
       },
       () => {
         this.sfxClick();
@@ -605,60 +760,119 @@ const Game = {
   },
 
   tickShop(dt) {
+    let needFullRender = false;
+    let needQueueRefresh = false;
+
     // spawn
     if (this.state.customersLeft > 0) {
       this.state.spawnTimer -= dt;
-      if (this.state.spawnTimer <= 0 && this.state.queue.length < 4) {
+      if (this.state.spawnTimer <= 0 && this.floorCount() < WALK_CONFIG.maxOnFloor) {
         this.spawnCustomer();
         this.state.spawnTimer = 4 + Math.random() * 5;
-        if (this.stateName === "SHOP") this.renderShop();
+        needFullRender = true;
       }
     }
 
-    // patience
-    let dirty = false;
-    let leftIds = [];
+    // walk-in / shuffle toward slots
     this.state.queue.forEach((c) => {
+      if (c.phase === "walking_in") {
+        c.walkT += dt;
+        const t = Math.min(1, c.walkT / c.walkDur);
+        // ease-out
+        const ease = 1 - Math.pow(1 - t, 2);
+        c.pos = ease * c.targetPos;
+        c.mood = "walk";
+        if (t >= 1) {
+          c.phase = "waiting";
+          c.pos = c.targetPos;
+          c.mood = "wait";
+          needQueueRefresh = true;
+        }
+      } else if (c.phase === "waiting") {
+        // gently ease if line reindexed
+        const diff = c.targetPos - c.pos;
+        if (Math.abs(diff) > 0.002) {
+          c.pos += diff * Math.min(1, dt * 3);
+        }
+      }
+    });
+
+    // departing walk-out
+    const stillDeparting = [];
+    this.state.departing.forEach((c) => {
+      if (c._outStart == null) c._outStart = c.pos != null ? c.pos : 0.88;
+      c.walkT += dt;
+      const t = Math.min(1, c.walkT / c.walkDur);
+      const ease = 1 - Math.pow(1 - t, 2);
+      c.pos = c._outStart * (1 - ease);
+      c.mood = c.exitReason === "angry" || c.exitReason === "left" ? "angry" : "happy";
+      if (t < 1) stillDeparting.push(c);
+      else needFullRender = true;
+    });
+    if (stillDeparting.length !== this.state.departing.length) {
+      needFullRender = true;
+    }
+    this.state.departing = stillDeparting;
+
+    // patience — only waiting customers
+    const leftIds = [];
+    this.state.queue.forEach((c) => {
+      if (c.phase !== "waiting") return;
       c.patience -= dt;
       if (c.patience <= 0) leftIds.push(c.id);
     });
     if (leftIds.length) {
-      this.state.queue = this.state.queue.filter((c) => {
-        if (leftIds.includes(c.id)) {
-          this.dayStats.left++;
-          this.state.rep = Math.max(0.5, this.state.rep - 0.15);
-          dirty = true;
-          return false;
-        }
-        return true;
+      const leavers = this.state.queue.filter((c) => leftIds.includes(c.id));
+      this.state.queue = this.state.queue.filter((c) => !leftIds.includes(c.id));
+      leavers.forEach((c) => {
+        this.dayStats.left++;
+        const stars = 1;
+        this.applyStarRep(stars);
+        this.recordStars(stars);
+        this.beginDepart(c, "left");
       });
-      if (dirty) {
-        this.sfxBad();
-        UI.toast("Một khách đã bỏ đi...", "bad");
-        this.renderShop();
-      }
-    } else {
-      // update patience bars without full re-render thrash: light update
-      const fills = document.querySelectorAll(".queue-list .patience-fill");
-      this.state.queue.forEach((c, i) => {
-        if (fills[i]) {
-          fills[i].style.width = Math.max(0, (c.patience / c.maxPatience) * 100) + "%";
-        }
-      });
+      this.reindexLineSlots();
+      this.sfxBad();
+      UI.toast("Một khách đã bỏ đi... ★☆☆☆☆", "bad");
+      needFullRender = true;
     }
 
-    // current customer also loses patience slowly while waiting at counter
+    // current customer patience at counter (SHOP only)
     if (this.state.currentCustomer && this.stateName === "SHOP") {
       this.state.currentCustomer.patience -= dt * 0.5;
       if (this.state.currentCustomer.patience <= 0) {
-        this.dayStats.left++;
-        this.state.rep = Math.max(0.5, this.state.rep - 0.2);
+        const c = this.state.currentCustomer;
         this.state.currentCustomer = null;
+        this.dayStats.left++;
+        const stars = 1;
+        this.applyStarRep(stars);
+        this.recordStars(stars);
+        this.beginDepart(c, "left");
         this.sfxBad();
         UI.toast("Khách ở quầy bỏ đi!", "bad");
-        this.renderShop();
+        needFullRender = true;
       }
     }
+
+    if (needFullRender && !UI.hasModal()) {
+      this.renderShop();
+      this.save();
+    } else {
+      UI.syncShopFloor(this.state);
+      if (needQueueRefresh && !UI.hasModal()) {
+        UI.renderQueue(this.state, {
+          takeOrder: (id) => this.takeOrder(id),
+        });
+        UI.refreshQueuePanelMeta(this.state, {
+          endDay: () => this.endDay(),
+        });
+      } else {
+        UI.syncPatienceBars(this.state);
+      }
+      if (needFullRender) this.save();
+    }
+
+    this.checkDayDone();
   },
 
   tickBrew(dt) {
@@ -667,22 +881,34 @@ const Game = {
     UI.updateMethodBar(this.brewSession);
     if (done) this.finishBrew();
 
-    // also drain customer patience during brew
     if (this.state.currentCustomer) {
       this.state.currentCustomer.patience -= dt;
       if (this.state.currentCustomer.patience <= 0) {
         this.brewSession.methodActive = false;
         this.brewSession = null;
-        this.dayStats.left++;
-        this.state.rep = Math.max(0.5, this.state.rep - 0.2);
+        const c = this.state.currentCustomer;
         this.state.currentCustomer = null;
+        this.dayStats.left++;
+        const stars = 1;
+        const repDelta = this.applyStarRep(stars);
+        this.recordStars(stars);
         this.stateName = "SHOP";
+        this.beginDepart(c, "left");
         this.sfxBad();
+        this.renderShop();
         UI.renderServeResult(
-          { quality: "left", payText: "Không kịp phục vụ" },
+          {
+            quality: "left",
+            payText: "Không kịp phục vụ",
+            stars,
+            repDelta,
+            flavor: this.starFlavor(stars),
+            starDisplay: this.starString(stars),
+          },
           () => {
             UI.closeModal();
             this.renderShop();
+            this.save();
           }
         );
       }

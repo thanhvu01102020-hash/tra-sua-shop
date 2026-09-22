@@ -129,6 +129,14 @@ const UI = {
     this.root.classList.add("screen-shop");
     const goal = GAME_CONFIG.dayGoals[state.day - 1] || 150000;
     const progress = Math.min(100, (state.dayRevenue / goal) * 100);
+    const waiting = (state.queue || []).filter((c) => c.phase === "waiting");
+    const walking = (state.queue || []).filter((c) => c.phase === "walking_in");
+    const floorEmpty =
+      waiting.length === 0 &&
+      walking.length === 0 &&
+      !(state.departing || []).length &&
+      !state.currentCustomer &&
+      state.customersLeft === 0;
 
     this.root.innerHTML = `
       <header class="hud">
@@ -148,16 +156,36 @@ const UI = {
         </div>
       </header>
       <div class="goal-bar"><div class="goal-fill" style="width:${progress}%"></div></div>
+
+      <section class="panel shop-floor-panel">
+        <div class="floor-header">
+          <h3>Không gian quán</h3>
+          <span class="muted small">Cửa → quầy · khách phải tới quầy mới nhận đơn</span>
+        </div>
+        <div class="shop-floor" id="shop-floor" aria-label="Sàn quán nhìn nghiêng">
+          <div class="floor-bg">
+            <div class="floor-door" title="Cửa vào">
+              <span class="door-emoji">🚪</span>
+              <span class="door-label">Cửa</span>
+            </div>
+            <div class="floor-path"></div>
+            <div class="floor-counter" title="Quầy bar">
+              <div class="bar-top">🧋</div>
+              <div class="bar-body"></div>
+              <span class="bar-label">Quầy</span>
+            </div>
+            <div class="floor-decor floor-plant">🪴</div>
+            <div class="floor-decor floor-lamp">🪟</div>
+          </div>
+          <div class="floor-actors" id="floor-actors"></div>
+        </div>
+      </section>
+
       <div class="shop-layout">
         <section class="panel queue-panel">
-          <h3>Hàng chờ <span class="muted">(${state.queue.length})</span></h3>
+          <h3>Hàng chờ <span class="muted" id="queue-count">(${waiting.length})</span></h3>
           <div id="queue-list" class="queue-list"></div>
-          ${state.queue.length === 0 && state.customersLeft === 0 && !state.currentCustomer
-            ? `<p class="muted center">Hết khách hôm nay.</p>
-               <button class="btn btn-primary" id="btn-end-day">Kết thúc ngày →</button>`
-            : state.queue.length === 0
-            ? `<p class="muted center">Đang chờ khách...</p>`
-            : ""}
+          <div id="queue-meta"></div>
         </section>
         <section class="panel counter-panel">
           <h3>Quầy phục vụ</h3>
@@ -175,41 +203,229 @@ const UI = {
     document.getElementById("btn-inv").onclick = handlers.openInventory;
     const muteBtn = document.getElementById("btn-mute-shop");
     if (muteBtn) muteBtn.onclick = handlers.toggleMute;
-    const endBtn = document.getElementById("btn-end-day");
-    if (endBtn) endBtn.onclick = handlers.endDay;
 
+    this.renderShopFloor(state);
     this.renderQueue(state, handlers);
+    this.refreshQueuePanelMeta(state, handlers);
     this.renderCounter(state, handlers);
     this.renderOrder(state);
+  },
+
+  allFloorActors(state) {
+    const list = [];
+    (state.queue || []).forEach((c) => list.push(c));
+    if (state.currentCustomer) list.push(state.currentCustomer);
+    (state.departing || []).forEach((c) => list.push(c));
+    return list;
+  },
+
+  actorLeftPct(c) {
+    // map 0..1 pos to ~8%..82% of floor width
+    const p = Math.max(0, Math.min(1, c.pos != null ? c.pos : 0));
+    return 8 + p * 74;
+  },
+
+  renderShopFloor(state) {
+    const box = document.getElementById("floor-actors");
+    if (!box) return;
+    box.innerHTML = "";
+    this.allFloorActors(state).forEach((c) => {
+      box.appendChild(this.makeFloorSprite(c));
+    });
+  },
+
+  makeFloorSprite(c) {
+    const el = document.createElement("div");
+    el.className = "floor-sprite phase-" + (c.phase || "waiting") + " mood-" + (c.mood || "wait");
+    el.dataset.id = c.id;
+    el.style.left = this.actorLeftPct(c) + "%";
+    const pct = Math.max(0, (c.patience / c.maxPatience) * 100);
+    const showPatience = c.phase === "waiting" || c.phase === "serving";
+    const status =
+      c.phase === "walking_in"
+        ? "đang tới…"
+        : c.phase === "walking_out"
+        ? c.mood === "angry"
+          ? "rời quán 💢"
+          : "tạm biệt 👋"
+        : c.phase === "serving"
+        ? "đặt món"
+        : "chờ";
+    el.innerHTML = `
+      ${
+        showPatience
+          ? `<div class="sprite-patience"><div class="patience-fill" style="width:${pct}%"></div></div>`
+          : `<div class="sprite-status">${status}</div>`
+      }
+      <div class="sprite-emoji">${c.emoji}</div>
+      <div class="sprite-name">${c.name}</div>
+      ${c.phase === "walking_in" ? `<div class="sprite-walk-dots">🚶</div>` : ""}
+    `;
+    return el;
+  },
+
+  syncShopFloor(state) {
+    const box = document.getElementById("floor-actors");
+    if (!box) return;
+    const actors = this.allFloorActors(state);
+    const ids = new Set(actors.map((c) => c.id));
+
+    // remove gone
+    [...box.querySelectorAll(".floor-sprite")].forEach((el) => {
+      if (!ids.has(el.dataset.id)) el.remove();
+    });
+
+    actors.forEach((c) => {
+      let el = box.querySelector(`.floor-sprite[data-id="${c.id}"]`);
+      if (!el) {
+        el = this.makeFloorSprite(c);
+        box.appendChild(el);
+      } else {
+        el.style.left = this.actorLeftPct(c) + "%";
+        el.className = "floor-sprite phase-" + (c.phase || "waiting") + " mood-" + (c.mood || "wait");
+        const showPatience = c.phase === "waiting" || c.phase === "serving";
+        const fill = el.querySelector(".patience-fill");
+        if (showPatience) {
+          if (!el.querySelector(".sprite-patience")) {
+            const bar = document.createElement("div");
+            bar.className = "sprite-patience";
+            bar.innerHTML = `<div class="patience-fill" style="width:${Math.max(0, (c.patience / c.maxPatience) * 100)}%"></div>`;
+            const status = el.querySelector(".sprite-status");
+            if (status) status.replaceWith(bar);
+            else el.prepend(bar);
+          } else if (fill) {
+            fill.style.width = Math.max(0, (c.patience / c.maxPatience) * 100) + "%";
+          }
+          const dots = el.querySelector(".sprite-walk-dots");
+          if (dots) dots.remove();
+        } else {
+          const statusText =
+            c.phase === "walking_in"
+              ? "đang tới…"
+              : c.mood === "angry"
+              ? "rời quán 💢"
+              : "tạm biệt 👋";
+          let st = el.querySelector(".sprite-status");
+          if (!st) {
+            const bar = el.querySelector(".sprite-patience");
+            st = document.createElement("div");
+            st.className = "sprite-status";
+            if (bar) bar.replaceWith(st);
+            else el.prepend(st);
+          }
+          st.textContent = statusText;
+        }
+      }
+    });
+  },
+
+  syncPatienceBars(state) {
+    const waiting = (state.queue || []).filter((c) => c.phase === "waiting");
+    const fills = document.querySelectorAll(".queue-list .patience-fill");
+    waiting.forEach((c, i) => {
+      if (fills[i]) {
+        fills[i].style.width = Math.max(0, (c.patience / c.maxPatience) * 100) + "%";
+      }
+    });
+    // floor patience
+    waiting.forEach((c) => {
+      const el = document.querySelector(`.floor-sprite[data-id="${c.id}"] .patience-fill`);
+      if (el) el.style.width = Math.max(0, (c.patience / c.maxPatience) * 100) + "%";
+    });
+    if (state.currentCustomer) {
+      const el = document.querySelector(
+        `.floor-sprite[data-id="${state.currentCustomer.id}"] .patience-fill`
+      );
+      if (el) {
+        el.style.width =
+          Math.max(0, (state.currentCustomer.patience / state.currentCustomer.maxPatience) * 100) +
+          "%";
+      }
+    }
+  },
+
+  refreshQueuePanelMeta(state, handlers) {
+    const meta = document.getElementById("queue-meta");
+    const count = document.getElementById("queue-count");
+    if (count) {
+      const waiting = (state.queue || []).filter((c) => c.phase === "waiting").length;
+      count.textContent = `(${waiting})`;
+    }
+    if (!meta) return;
+    const waiting = (state.queue || []).filter((c) => c.phase === "waiting");
+    const walking = (state.queue || []).filter((c) => c.phase === "walking_in");
+    const done =
+      waiting.length === 0 &&
+      walking.length === 0 &&
+      !(state.departing || []).length &&
+      !state.currentCustomer &&
+      state.customersLeft === 0;
+
+    if (done) {
+      meta.innerHTML = `<p class="muted center">Hết khách hôm nay.</p>
+        <button class="btn btn-primary" id="btn-end-day">Kết thúc ngày →</button>`;
+      const endBtn = document.getElementById("btn-end-day");
+      if (endBtn && handlers.endDay) endBtn.onclick = handlers.endDay;
+    } else if (waiting.length === 0) {
+      meta.innerHTML = `<p class="muted center">${
+        walking.length ? "Khách đang đi vào quán…" : "Đang chờ khách..."
+      }</p>`;
+    } else {
+      meta.innerHTML = "";
+    }
   },
 
   renderQueue(state, handlers) {
     const list = document.getElementById("queue-list");
     if (!list) return;
     list.innerHTML = "";
-    state.queue.forEach((c, i) => {
+    const waiting = (state.queue || []).filter((c) => c.phase === "waiting");
+    waiting.forEach((c, i) => {
       const pct = Math.max(0, (c.patience / c.maxPatience) * 100);
       const div = document.createElement("div");
       div.className = "customer-card" + (i === 0 ? " first" : "");
+      div.dataset.id = c.id;
       div.innerHTML = `
         <div class="cust-emoji">${c.emoji}</div>
         <div class="cust-info">
           <div class="cust-name">${c.name}${c.isNPC ? " · " + c.npcRole : ""}</div>
           <div class="patience"><div class="patience-fill" style="width:${pct}%"></div></div>
         </div>
-        ${i === 0 && !state.currentCustomer ? `<button class="btn btn-sm btn-primary take-btn">Nhận</button>` : ""}
+        ${
+          i === 0 && !state.currentCustomer
+            ? `<button class="btn btn-sm btn-primary take-btn">Nhận</button>`
+            : i === 0
+            ? `<span class="muted small">Đang phục vụ</span>`
+            : `<span class="muted small">chờ</span>`
+        }
       `;
       const btn = div.querySelector(".take-btn");
-      if (btn) btn.onclick = () => handlers.takeOrder(0);
+      if (btn) btn.onclick = () => handlers.takeOrder(c.id);
       list.appendChild(div);
     });
+
+    // also show walking_in as non-orderable previews
+    (state.queue || [])
+      .filter((c) => c.phase === "walking_in")
+      .forEach((c) => {
+        const div = document.createElement("div");
+        div.className = "customer-card walking";
+        div.innerHTML = `
+          <div class="cust-emoji">${c.emoji}</div>
+          <div class="cust-info">
+            <div class="cust-name">${c.name}</div>
+            <div class="muted small">🚶 Đang đi vào…</div>
+          </div>
+        `;
+        list.appendChild(div);
+      });
   },
 
   renderCounter(state, handlers) {
     const area = document.getElementById("counter-area");
     if (!area) return;
     if (!state.currentCustomer) {
-      area.innerHTML = `<div class="empty-counter">🧋<p>Chọn khách đầu hàng để nhận đơn</p></div>`;
+      area.innerHTML = `<div class="empty-counter">🧋<p>Chọn khách đã tới quầy để nhận đơn</p></div>`;
       return;
     }
     const c = state.currentCustomer;
@@ -417,19 +633,30 @@ const UI = {
 
   /* ---------- MODALS ---------- */
   modal(html) {
-    let root = document.getElementById("modal-root");
+    // Prefer body-level overlay so SHOP re-renders (walk animations) don't wipe it
+    let root = document.getElementById("modal-root-global");
     if (!root) {
       root = document.createElement("div");
-      root.id = "modal-root";
-      this.root.appendChild(root);
+      root.id = "modal-root-global";
+      document.body.appendChild(root);
     }
     root.innerHTML = `<div class="modal-backdrop"><div class="modal card">${html}</div></div>`;
+    // also clear in-app modal hole if present
+    const local = document.getElementById("modal-root");
+    if (local) local.innerHTML = "";
     return root;
   },
 
   closeModal() {
-    const root = document.getElementById("modal-root");
+    const root = document.getElementById("modal-root-global");
     if (root) root.innerHTML = "";
+    const local = document.getElementById("modal-root");
+    if (local) local.innerHTML = "";
+  },
+
+  hasModal() {
+    const root = document.getElementById("modal-root-global");
+    return !!(root && root.innerHTML.trim());
   },
 
   renderRecipesModal(state, onClose) {
@@ -486,6 +713,8 @@ const UI = {
           <li>Hoàn hảo: <b>${summary.perfect}</b> · Sai: <b>${summary.wrong}</b> · Bỏ đi: <b>${summary.left}</b></li>
           <li>Tip nhận: <b>${this.money(summary.tips)}</b></li>
           <li>Uy tín: <b>${this.stars(summary.rep)}</b> (${summary.repDelta >= 0 ? "+" : ""}${summary.repDelta.toFixed(1)})</li>
+          <li>Đánh giá TB: <b>${summary.starCount ? ("★".repeat(Math.round(summary.avgStars)) + "☆".repeat(Math.max(0, 5 - Math.round(summary.avgStars))) + " " + summary.avgStars.toFixed(1) + "/5") : "—"}</b>
+            ${summary.starCount ? `(${summary.starCount} lượt)` : ""}</li>
           <li>Tiền hiện có: <b>${this.money(summary.money)}</b></li>
         </ul>
         <p class="flavor">${goalMet ? "Một ngày tốt đẹp! Quán đang lớn dần." : "Chưa đạt mục tiêu — ngày mai cố thêm nhé!"}</p>
@@ -587,9 +816,26 @@ const UI = {
       left: { title: "Khách bỏ đi...", cls: "bad", msg: "Hết kiên nhẫn." },
     };
     const m = map[result.quality] || map.ok;
+    const stars = result.stars || 0;
+    const starDisplay =
+      result.starDisplay ||
+      (stars ? "★".repeat(stars) + "☆".repeat(Math.max(0, 5 - stars)) : "");
+    const repDelta = result.repDelta != null ? result.repDelta : 0;
+    const repTxt =
+      (repDelta >= 0 ? "+" : "") + repDelta.toFixed(2) + " uy tín";
     this.modal(`
       <h2 class="${m.cls}">${m.title}</h2>
       <p>${m.msg}</p>
+      ${
+        stars
+          ? `<div class="rating-block">
+              <div class="rating-stars">${starDisplay}</div>
+              <p class="rating-line">Khách đánh giá: <b>${starDisplay}</b> (${stars}/5)</p>
+              <p class="flavor">“${result.flavor || ""}”</p>
+              <p class="muted small">Uy tín: ${repTxt}</p>
+            </div>`
+          : ""
+      }
       <p>${result.payText || ""}</p>
       <button class="btn btn-primary" id="modal-close">OK</button>
     `);

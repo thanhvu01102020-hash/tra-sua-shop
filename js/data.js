@@ -289,3 +289,20 @@ const CUSTOMER_NAMES = [
 ];
 
 const CUSTOMER_EMOJIS = ["😊", "🙂", "😎", "🤓", "😌", "🤗", "😺", "🧑", "👩", "👨"];
+
+/** Star rating flavor (1–5) */
+const STAR_FLAVOR = {
+  5: ["Xuất sắc! Sẽ quay lại ngay!", "Đỉnh của chóp ✨", "Trà ngon đúng gu!"],
+  4: ["Rất ổn, cảm ơn quán!", "Ngon và nhanh!", "Sẽ giới thiệu bạn bè."],
+  3: ["Cũng được…", "Tạm ổn trong ngày bận.", "Lần sau nhanh hơn chút nhé."],
+  2: ["Không đúng món mình đặt…", "Hơi thất vọng.", "Cần cải thiện công thức."],
+  1: ["Tệ quá…", "Mình sẽ không quay lại sớm.", "Phục vụ chưa ổn."],
+};
+
+const WALK_CONFIG = {
+  inMin: 1.2,
+  inMax: 2.5,
+  outMin: 1.0,
+  outMax: 1.8,
+  maxOnFloor: 4,
+};
