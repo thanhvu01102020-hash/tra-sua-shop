@@ -324,8 +324,11 @@ const DEVICES = [
     emoji: "🪑",
     maxLevel: 4,
     costs: [25000, 42000, 65000, 92000],
-    blurb: "Khách chờ lâu hơn; chỗ ngồi ấm cúng.",
-    effectLine: (lv) => (lv ? `Kiên nhẫn +${lv * 5}s · +${Math.floor(lv / 2)} khách` : "Chỗ đứng cơ bản"),
+    blurb: "Thêm bàn ngồi, khách chờ lâu hơn.",
+    effectLine: (lv) =>
+      lv
+        ? `+${Math.floor(lv / 2) + (lv >= 3 ? 1 : 0)} bàn · kiên nhẫn +${lv * 5}s · +${Math.floor(lv / 2)} khách`
+        : "Số bàn theo ngày",
   },
   {
     id: "pos",
@@ -604,3 +607,117 @@ const LEGACY_UPGRADE_MAP = {
   better_sign: { id: "sign", level: 1 },
   restock_discount: { id: "cooler", level: 2 },
 };
+
+/* ===== v3: tables, staff, dine-in / takeaway ===== */
+
+GAME_CONFIG.saveKey = "trasua_shop_save_v3";
+GAME_CONFIG.saveKeyLegacyV2 = "trasua_shop_save_v2";
+GAME_CONFIG.saveKeyLegacy = "trasua_shop_save_v1";
+GAME_CONFIG.saveVersion = 3;
+GAME_CONFIG.maxTables = 6;
+GAME_CONFIG.cleanDuration = 2.2;
+GAME_CONFIG.eatDuration = 4.5;
+GAME_CONFIG.readyPickupWait = 18;
+
+/** Stronger variety — avoid everyone ordering the same single type */
+function orderTypeWeights(day) {
+  const d = Math.max(1, Math.min(GAME_CONFIG.totalDays, day));
+  const unlockedSnacks = SNACKS.filter((s) => s.unlockDay <= d).length;
+  if (!unlockedSnacks) return { drink: 1, snack: 0, combo: 0 };
+  // Ensure non-trivial mix once snacks unlock — never "everyone same type"
+  let drink, snack, combo;
+  if (d < 3) {
+    drink = 0.55;
+    snack = 0.25;
+    combo = 0.2;
+  } else if (d < 7) {
+    drink = 0.45;
+    snack = 0.25;
+    combo = 0.3;
+  } else if (d < 15) {
+    drink = 0.38;
+    snack = 0.27;
+    combo = 0.35;
+  } else {
+    drink = 0.32;
+    snack = 0.28;
+    combo = 0.4;
+  }
+  const sum = drink + snack + combo;
+  return { drink: drink / sum, snack: snack / sum, combo: combo / sum };
+}
+
+/** Chance customer is dine-in (rest takeaway). Low early, rises mid-game. */
+function dineInWeight(day) {
+  const d = Math.max(1, Math.min(GAME_CONFIG.totalDays, day));
+  if (d <= 2) return 0.35;
+  if (d <= 5) return 0.45;
+  if (d <= 12) return 0.52;
+  return Math.min(0.62, 0.5 + (d - 12) * 0.008);
+}
+
+/** Base table count by day (before seating upgrade). */
+function baseTables(day) {
+  if (day <= 2) return 2;
+  if (day <= 5) return 3;
+  if (day <= 12) return 4;
+  if (day <= 20) return 5;
+  return 5;
+}
+
+/** Total tables unlocked (capped). seating device adds more. */
+function tableCount(day, upgrades) {
+  const seat = Math.max(0, Math.min(4, (upgrades && upgrades.seating) | 0));
+  const n = baseTables(day) + Math.floor(seat / 2) + (seat >= 3 ? 1 : 0);
+  return Math.min(GAME_CONFIG.maxTables, Math.max(2, n));
+}
+
+const STAFF_ROLES = [
+  {
+    id: "cashier",
+    name: "Thu ngân / pha chế",
+    emoji: "🧾",
+    blurb: "Tự nhận đơn quầy mang đi & hỗ trợ pha nhanh hơn một chút.",
+    wage: 12000,
+    wageScale: 800,
+    unlockDay: 3,
+    effect: "autoTakeaway + brewSpeed",
+  },
+  {
+    id: "server",
+    name: "Phục vụ",
+    emoji: "🍽️",
+    blurb: "Tự bưng món tới bàn và dọn bàn chậm khi rảnh.",
+    wage: 14000,
+    wageScale: 900,
+    unlockDay: 4,
+    effect: "autoServe + softClean",
+  },
+  {
+    id: "janitor",
+    name: "Tạp vụ",
+    emoji: "🧹",
+    blurb: "Ưu tiên dọn bàn bẩn nhanh.",
+    wage: 10000,
+    wageScale: 700,
+    unlockDay: 5,
+    effect: "priorityClean",
+  },
+];
+
+function staffWage(role, day) {
+  return role.wage + Math.floor(Math.max(0, day - 1) * role.wageScale);
+}
+
+/** Max simultaneous hired staff by day. */
+function maxStaffSlots(day) {
+  if (day < 3) return 0;
+  if (day < 8) return 1;
+  if (day < 15) return 2;
+  return 3;
+}
+
+function staffCount(staff) {
+  if (!staff) return 0;
+  return (staff.cashier ? 1 : 0) + (staff.server ? 1 : 0) + (staff.janitor ? 1 : 0);
+}

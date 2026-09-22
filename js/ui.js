@@ -59,7 +59,7 @@ const UI = {
           <button class="btn btn-primary" id="btn-new">☕ Ván mới</button>
           <button class="btn btn-secondary" id="btn-continue" ${hasSave ? "" : "disabled"}>💾 Tiếp tục</button>
         </div>
-        <p class="hint">30 ngày · Trà & món ăn nhẹ · Nâng cấp thiết bị · Câu chuyện nhẹ</p>
+        <p class="hint">30 ngày · Tại chỗ & mang đi · Bàn · Nhân viên · Snack · Thiết bị</p>
         <button class="btn btn-ghost btn-mute" id="btn-mute" title="Âm thanh">🔊</button>
       </div>
     `;
@@ -137,11 +137,19 @@ const UI = {
   },
 
   /* ---------- SHOP HUD ---------- */
+  serviceBadge(service) {
+    if (service === "dinein") return `<span class="badge badge-dinein">Tại chỗ</span>`;
+    return `<span class="badge badge-takeaway">Mang đi</span>`;
+  },
+
   renderShop(state, handlers) {
     this.clear();
     this.root.classList.add("screen-shop");
     const goal = dayGoal(state.day);
     const progress = Math.min(100, (state.dayRevenue / goal) * 100);
+    const staffN = staffCount(state.staff);
+    const tablesN = (state.tables || []).length;
+    const dirtyN = (state.tables || []).filter((t) => t.status === "dirty" || t.status === "cleaning").length;
 
     this.root.innerHTML = `
       <header class="hud">
@@ -153,10 +161,13 @@ const UI = {
           <span title="Tiền">💰 ${this.money(state.money)}</span>
           <span title="Uy tín">⭐ ${this.stars(state.rep)}</span>
           <span title="Doanh thu ngày">📈 ${this.money(state.dayRevenue)} / ${this.money(goal)}</span>
+          <span title="Bàn" class="hud-chip">🪑 ${tablesN}${dirtyN ? ` · bẩn ${dirtyN}` : ""}</span>
+          ${staffN ? `<span title="Nhân viên" class="hud-chip">👥 ${staffN}</span>` : ""}
         </div>
         <div class="hud-right">
           <button class="btn btn-ghost btn-sm" id="btn-recipes">📖 Menu</button>
           <button class="btn btn-ghost btn-sm" id="btn-inv">📦 Kho</button>
+          <button class="btn btn-ghost btn-sm" id="btn-staff-shop">👥 NV</button>
           <button class="btn btn-ghost btn-sm" id="btn-mute-shop">🔊</button>
         </div>
       </header>
@@ -164,40 +175,48 @@ const UI = {
 
       <section class="panel shop-floor-panel">
         <div class="floor-header">
-          <h3>Không gian quán</h3>
-          <span class="muted small">Cửa → quầy · khách phải tới quầy mới nhận đơn</span>
+          <h3>Sàn quán</h3>
+          <span class="muted small">Mang đi → quầy · Tại chỗ → bàn · Bưng món / Dọn bàn</span>
         </div>
-        <div class="shop-floor" id="shop-floor" aria-label="Sàn quán nhìn nghiêng">
+        <div class="shop-floor shop-floor-v3" id="shop-floor" aria-label="Sàn quán">
           <div class="floor-bg">
             <div class="floor-door" title="Cửa vào">
               <span class="door-emoji">🚪</span>
               <span class="door-label">Cửa</span>
             </div>
             <div class="floor-path"></div>
-            <div class="floor-counter" title="Quầy bar">
+            <div class="floor-tables" id="floor-tables"></div>
+            <div class="floor-counter" title="Quầy">
               <div class="bar-top">🧋</div>
               <div class="bar-body"></div>
               <span class="bar-label">Quầy</span>
             </div>
+            <div class="floor-pickup" title="Chỗ lấy mang đi">
+              <span>🛍️</span>
+              <span class="door-label">Mang đi</span>
+            </div>
             <div class="floor-decor floor-plant">🪴</div>
             <div class="floor-decor floor-lamp">🪟</div>
+            <div class="floor-staff" id="floor-staff"></div>
           </div>
           <div class="floor-actors" id="floor-actors"></div>
         </div>
+        <div class="floor-actions" id="floor-actions"></div>
       </section>
 
-      <div class="shop-layout">
+      <div class="shop-layout shop-layout-v3">
         <section class="panel queue-panel">
-          <h3>Hàng chờ <span class="muted" id="queue-count">(0)</span></h3>
+          <h3>Khách <span class="muted" id="queue-count">(0)</span></h3>
           <div id="queue-list" class="queue-list"></div>
           <div id="queue-meta"></div>
         </section>
         <section class="panel counter-panel">
-          <h3>Quầy phục vụ</h3>
+          <h3>Quầy / Phục vụ</h3>
           <div id="counter-area"></div>
+          <div id="ready-tray" class="ready-tray"></div>
         </section>
         <section class="panel order-panel">
-          <h3>Đơn hiện tại</h3>
+          <h3>Vé đơn</h3>
           <div id="order-area"></div>
         </section>
       </div>
@@ -206,20 +225,189 @@ const UI = {
 
     document.getElementById("btn-recipes").onclick = handlers.openRecipes;
     document.getElementById("btn-inv").onclick = handlers.openInventory;
+    const staffBtn = document.getElementById("btn-staff-shop");
+    if (staffBtn) staffBtn.onclick = handlers.openStaff;
     const muteBtn = document.getElementById("btn-mute-shop");
     if (muteBtn) muteBtn.onclick = handlers.toggleMute;
 
+    this.renderTables(state, handlers);
+    this.renderStaffSprites(state);
     this.renderShopFloor(state);
+    this.renderFloorActions(state, handlers);
     this.renderQueue(state, handlers);
     this.refreshQueuePanelMeta(state, handlers);
     this.renderCounter(state, handlers);
+    this.renderReadyTray(state, handlers);
     this.renderOrder(state);
+  },
+
+  renderStaffSprites(state) {
+    const box = document.getElementById("floor-staff");
+    if (!box) return;
+    const staff = state.staff || {};
+    if (!state.staffActive) {
+      box.innerHTML = "";
+      return;
+    }
+    const bits = [];
+    if (staff.cashier) bits.push(`<span class="staff-sprite" title="Thu ngân">🧾</span>`);
+    if (staff.server) bits.push(`<span class="staff-sprite" title="Phục vụ">🍽️</span>`);
+    if (staff.janitor) bits.push(`<span class="staff-sprite" title="Tạp vụ">🧹</span>`);
+    box.innerHTML = bits.join("");
+  },
+
+  renderTables(state, handlers) {
+    const box = document.getElementById("floor-tables");
+    if (!box) return;
+    box.innerHTML = "";
+    const tables = state.tables || [];
+    tables.forEach((t) => {
+      const el = document.createElement("button");
+      el.type = "button";
+      el.className = "table-spot status-" + t.status;
+      el.dataset.tableId = t.id;
+      el.style.left = this.tableLeftPct(t.index, tables.length) + "%";
+      const cust =
+        t.customerId &&
+        ((state.queue || []).find((c) => c.id === t.customerId) ||
+          (state.currentCustomer && state.currentCustomer.id === t.customerId
+            ? state.currentCustomer
+            : null));
+      let label = t.id.replace("t", "B");
+      let sub = "trống";
+      if (t.status === "occupied") {
+        sub = cust ? cust.emoji + " " + cust.name : "có khách";
+      } else if (t.status === "dirty") {
+        sub = "bẩn · Dọn";
+      } else if (t.status === "cleaning") {
+        const pct = Math.min(100, Math.round((t.cleanT || 0) * 100));
+        sub = `đang dọn ${pct}%`;
+      }
+      el.innerHTML = `
+        <span class="table-emoji">${t.status === "dirty" ? "🪑💨" : t.status === "cleaning" ? "🧹" : "🪑"}</span>
+        <span class="table-id">${label}</span>
+        <span class="table-sub">${sub}</span>
+        ${
+          t.status === "cleaning"
+            ? `<span class="table-cleanbar"><span style="width:${Math.min(100, (t.cleanT || 0) * 100)}%"></span></span>`
+            : ""
+        }
+      `;
+      el.onclick = () => {
+        if (t.status === "dirty" && handlers.cleanTable) handlers.cleanTable(t.id);
+        else if (t.status === "occupied" && cust) {
+          if (cust.phase === "seated_ready" && handlers.takeOrder) handlers.takeOrder(cust.id);
+          else if (cust.phase === "waiting_food" && handlers.deliverToTable)
+            handlers.deliverToTable(t.id);
+        }
+      };
+      box.appendChild(el);
+    });
+  },
+
+  tableLeftPct(index, total) {
+    const start = 18;
+    const span = 42;
+    if (total <= 1) return start + span / 2;
+    return start + (index / (total - 1)) * span;
+  },
+
+  syncTables(state, handlers) {
+    const box = document.getElementById("floor-tables");
+    if (!box) return;
+    // lightweight update of status labels
+    (state.tables || []).forEach((t) => {
+      let el = box.querySelector(`[data-table-id="${t.id}"]`);
+      if (!el) {
+        this.renderTables(state, handlers || {});
+        return;
+      }
+      el.className = "table-spot status-" + t.status;
+      const cust =
+        t.customerId &&
+        ((state.queue || []).find((c) => c.id === t.customerId) ||
+          (state.currentCustomer && state.currentCustomer.id === t.customerId
+            ? state.currentCustomer
+            : null));
+      const subEl = el.querySelector(".table-sub");
+      const emojiEl = el.querySelector(".table-emoji");
+      if (emojiEl) {
+        emojiEl.textContent =
+          t.status === "dirty" ? "🪑💨" : t.status === "cleaning" ? "🧹" : "🪑";
+      }
+      if (subEl) {
+        if (t.status === "occupied") subEl.textContent = cust ? cust.emoji + " " + cust.name : "có khách";
+        else if (t.status === "dirty") subEl.textContent = "bẩn · Dọn";
+        else if (t.status === "cleaning")
+          subEl.textContent = `đang dọn ${Math.min(100, Math.round((t.cleanT || 0) * 100))}%`;
+        else subEl.textContent = "trống";
+      }
+      let bar = el.querySelector(".table-cleanbar");
+      if (t.status === "cleaning") {
+        if (!bar) {
+          bar = document.createElement("span");
+          bar.className = "table-cleanbar";
+          bar.innerHTML = "<span></span>";
+          el.appendChild(bar);
+        }
+        const fill = bar.querySelector("span");
+        if (fill) fill.style.width = Math.min(100, (t.cleanT || 0) * 100) + "%";
+      } else if (bar) {
+        bar.remove();
+      }
+    });
+  },
+
+  renderFloorActions(state, handlers) {
+    const box = document.getElementById("floor-actions");
+    if (!box) return;
+    const dirty = (state.tables || []).filter((t) => t.status === "dirty");
+    const readyDi = (state.readyTray || []).filter((t) => t.service === "dinein");
+    const readyTw = (state.readyTray || []).filter((t) => t.service === "takeaway");
+    const seated = (state.queue || []).filter((c) => c.phase === "seated_ready");
+    const bits = [];
+    if (seated.length && !state.currentCustomer) {
+      bits.push(
+        `<button class="btn btn-sm btn-primary" id="fa-take">📝 Nhận đơn bàn (${seated[0].name})</button>`
+      );
+    }
+    if (readyDi.length) {
+      bits.push(
+        `<button class="btn btn-sm btn-secondary" id="fa-serve">🍽️ Bưng món (${readyDi.length})</button>`
+      );
+    }
+    if (readyTw.length) {
+      bits.push(
+        `<button class="btn btn-sm btn-secondary" id="fa-bag">🛍️ Giao mang đi (${readyTw.length})</button>`
+      );
+    }
+    if (dirty.length) {
+      bits.push(
+        `<button class="btn btn-sm btn-ghost" id="fa-clean">🧹 Dọn bàn (${dirty.length})</button>`
+      );
+    }
+    box.innerHTML = bits.join(" ") || `<span class="muted small">Không có việc sàn ngay</span>`;
+    const take = document.getElementById("fa-take");
+    if (take) take.onclick = () => handlers.takeOrder(seated[0].id);
+    const serve = document.getElementById("fa-serve");
+    if (serve) serve.onclick = () => handlers.serveReady(readyDi[0].id);
+    const bag = document.getElementById("fa-bag");
+    if (bag) bag.onclick = () => handlers.serveReady(readyTw[0].id);
+    const clean = document.getElementById("fa-clean");
+    if (clean) clean.onclick = () => handlers.cleanTable(dirty[0].id);
   },
 
   allFloorActors(state) {
     const list = [];
-    (state.queue || []).forEach((c) => list.push(c));
-    if (state.currentCustomer) list.push(state.currentCustomer);
+    (state.queue || []).forEach((c) => {
+      // seated customers shown at tables primarily; still show sprite near table
+      list.push(c);
+    });
+    if (state.currentCustomer && state.currentCustomer.service === "takeaway") {
+      if (!list.find((c) => c.id === state.currentCustomer.id)) list.push(state.currentCustomer);
+    } else if (state.currentCustomer && state.currentCustomer.service === "dinein") {
+      if (!list.find((c) => c.id === state.currentCustomer.id)) list.push(state.currentCustomer);
+    }
     (state.departing || []).forEach((c) => list.push(c));
     return list;
   },
@@ -240,30 +428,50 @@ const UI = {
 
   makeFloorSprite(c) {
     const el = document.createElement("div");
-    el.className = "floor-sprite phase-" + (c.phase || "waiting") + " mood-" + (c.mood || "wait");
+    el.className =
+      "floor-sprite phase-" +
+      (c.phase || "waiting") +
+      " mood-" +
+      (c.mood || "wait") +
+      " svc-" +
+      (c.service || "takeaway");
     el.dataset.id = c.id;
     el.style.left = this.actorLeftPct(c) + "%";
+    if (c.service === "dinein" && (c.phase === "seated_ready" || c.phase === "serving" || c.phase === "waiting_food" || c.phase === "eating")) {
+      el.style.bottom = "58px";
+    }
     const pct = Math.max(0, (c.patience / c.maxPatience) * 100);
-    const showPatience = c.phase === "waiting" || c.phase === "serving";
-    const status =
-      c.phase === "walking_in"
-        ? "đang tới…"
-        : c.phase === "walking_out"
-        ? c.mood === "angry"
-          ? "rời quán 💢"
-          : "tạm biệt 👋"
-        : c.phase === "serving"
-        ? "đặt món"
-        : "chờ";
+    const showPatience = [
+      "waiting",
+      "serving",
+      "waiting_table",
+      "seated_ready",
+      "waiting_food",
+      "waiting_pickup",
+    ].includes(c.phase);
+    const statusMap = {
+      walking_in: "đang tới…",
+      walking_out: c.mood === "angry" ? "rời quán 💢" : c.bag ? "mang túi 👋" : "tạm biệt 👋",
+      serving: "đặt món",
+      waiting: "chờ quầy",
+      waiting_table: "chờ bàn",
+      seated_ready: "ngồi · chờ nhận",
+      waiting_food: "chờ món",
+      waiting_pickup: "chờ túi",
+      eating: "đang ăn…",
+    };
+    const status = statusMap[c.phase] || "…";
+    const svcIcon = c.service === "dinein" ? "🪑" : "🛍️";
     el.innerHTML = `
       ${
         showPatience
           ? `<div class="sprite-patience"><div class="patience-fill" style="width:${pct}%"></div></div>`
           : `<div class="sprite-status">${status}</div>`
       }
-      <div class="sprite-emoji">${c.emoji}</div>
-      <div class="sprite-name">${c.name}</div>
+      <div class="sprite-emoji">${c.emoji}${c.bag ? "🛍️" : ""}</div>
+      <div class="sprite-name">${svcIcon}${c.name}</div>
       ${c.phase === "walking_in" ? `<div class="sprite-walk-dots">🚶</div>` : ""}
+      ${!showPatience && c.phase !== "walking_in" ? "" : showPatience ? `<div class="sprite-status micro">${status}</div>` : ""}
     `;
     return el;
   },
@@ -285,50 +493,54 @@ const UI = {
         box.appendChild(el);
       } else {
         el.style.left = this.actorLeftPct(c) + "%";
-        el.className = "floor-sprite phase-" + (c.phase || "waiting") + " mood-" + (c.mood || "wait");
-        const showPatience = c.phase === "waiting" || c.phase === "serving";
-        const fill = el.querySelector(".patience-fill");
-        if (showPatience) {
-          if (!el.querySelector(".sprite-patience")) {
-            const bar = document.createElement("div");
-            bar.className = "sprite-patience";
-            bar.innerHTML = `<div class="patience-fill" style="width:${Math.max(0, (c.patience / c.maxPatience) * 100)}%"></div>`;
-            const status = el.querySelector(".sprite-status");
-            if (status) status.replaceWith(bar);
-            else el.prepend(bar);
-          } else if (fill) {
-            fill.style.width = Math.max(0, (c.patience / c.maxPatience) * 100) + "%";
-          }
-          const dots = el.querySelector(".sprite-walk-dots");
-          if (dots) dots.remove();
+        el.className =
+          "floor-sprite phase-" +
+          (c.phase || "waiting") +
+          " mood-" +
+          (c.mood || "wait") +
+          " svc-" +
+          (c.service || "takeaway");
+        if (
+          c.service === "dinein" &&
+          ["seated_ready", "serving", "waiting_food", "eating"].includes(c.phase)
+        ) {
+          el.style.bottom = "58px";
         } else {
-          const statusText =
-            c.phase === "walking_in"
-              ? "đang tới…"
-              : c.mood === "angry"
-              ? "rời quán 💢"
-              : "tạm biệt 👋";
-          let st = el.querySelector(".sprite-status");
-          if (!st) {
-            const bar = el.querySelector(".sprite-patience");
-            st = document.createElement("div");
-            st.className = "sprite-status";
-            if (bar) bar.replaceWith(st);
-            else el.prepend(st);
-          }
-          st.textContent = statusText;
+          el.style.bottom = "";
         }
+        const showPatience = [
+          "waiting",
+          "serving",
+          "waiting_table",
+          "seated_ready",
+          "waiting_food",
+          "waiting_pickup",
+        ].includes(c.phase);
+        const fill = el.querySelector(".patience-fill");
+        if (showPatience && fill) {
+          fill.style.width = Math.max(0, (c.patience / c.maxPatience) * 100) + "%";
+        }
+        const emoji = el.querySelector(".sprite-emoji");
+        if (emoji) emoji.textContent = c.emoji + (c.bag ? "🛍️" : "");
       }
     });
   },
 
   syncPatienceBars(state) {
-    const waiting = (state.queue || []).filter((c) => c.phase === "waiting");
-    const fills = document.querySelectorAll(".queue-list .patience-fill");
-    waiting.forEach((c, i) => {
-      if (fills[i]) {
-        fills[i].style.width = Math.max(0, (c.patience / c.maxPatience) * 100) + "%";
-      }
+    const waiting = (state.queue || []).filter(
+      (c) =>
+        c.phase === "waiting" ||
+        c.phase === "waiting_table" ||
+        c.phase === "seated_ready" ||
+        c.phase === "waiting_food" ||
+        c.phase === "waiting_pickup"
+    );
+    document.querySelectorAll(".queue-list .customer-card").forEach((card) => {
+      const id = card.dataset.id;
+      const c = waiting.find((x) => x.id === id);
+      if (!c) return;
+      const fill = card.querySelector(".patience-fill");
+      if (fill) fill.style.width = Math.max(0, (c.patience / c.maxPatience) * 100) + "%";
     });
     waiting.forEach((c) => {
       const el = document.querySelector(`.floor-sprite[data-id="${c.id}"] .patience-fill`);
@@ -340,38 +552,50 @@ const UI = {
       );
       if (el) {
         el.style.width =
-          Math.max(0, (state.currentCustomer.patience / state.currentCustomer.maxPatience) * 100) +
-          "%";
+          Math.max(
+            0,
+            (state.currentCustomer.patience / state.currentCustomer.maxPatience) * 100
+          ) + "%";
       }
     }
+    // sync clean bars
+    this.syncTables(state, {});
   },
 
   refreshQueuePanelMeta(state, handlers) {
     const meta = document.getElementById("queue-meta");
     const count = document.getElementById("queue-count");
-    if (count) {
-      const waiting = (state.queue || []).filter((c) => c.phase === "waiting").length;
-      count.textContent = `(${waiting})`;
-    }
+    const activePhases = new Set([
+      "waiting",
+      "waiting_table",
+      "seated_ready",
+      "waiting_food",
+      "waiting_pickup",
+      "eating",
+      "serving",
+      "walking_in",
+    ]);
+    const active = (state.queue || []).filter((c) => activePhases.has(c.phase)).length;
+    if (count) count.textContent = `(${active})`;
     if (!meta) return;
-    const waiting = (state.queue || []).filter((c) => c.phase === "waiting");
-    const walking = (state.queue || []).filter((c) => c.phase === "walking_in");
-    const done =
-      waiting.length === 0 &&
-      walking.length === 0 &&
-      !(state.departing || []).length &&
-      !state.currentCustomer &&
-      state.customersLeft === 0;
+
+    const busy =
+      active > 0 ||
+      (state.departing || []).length > 0 ||
+      state.currentCustomer ||
+      (state.readyTray || []).length > 0 ||
+      state.customersLeft > 0 ||
+      (state.tables || []).some((t) => t.status === "occupied" || t.status === "cleaning");
+
+    const done = !busy;
 
     if (done) {
       meta.innerHTML = `<p class="muted center">Hết khách hôm nay.</p>
         <button class="btn btn-primary" id="btn-end-day">Kết thúc ngày →</button>`;
       const endBtn = document.getElementById("btn-end-day");
       if (endBtn && handlers.endDay) endBtn.onclick = handlers.endDay;
-    } else if (waiting.length === 0) {
-      meta.innerHTML = `<p class="muted center">${
-        walking.length ? "Khách đang đi vào quán…" : "Đang chờ khách..."
-      }</p>`;
+    } else if (active === 0 && state.customersLeft > 0) {
+      meta.innerHTML = `<p class="muted center">Đang chờ khách...</p>`;
     } else {
       meta.innerHTML = "";
     }
@@ -381,54 +605,125 @@ const UI = {
     const list = document.getElementById("queue-list");
     if (!list) return;
     list.innerHTML = "";
-    const waiting = (state.queue || []).filter((c) => c.phase === "waiting");
-    waiting.forEach((c, i) => {
+
+    const showPhases = [
+      "waiting",
+      "waiting_table",
+      "seated_ready",
+      "waiting_food",
+      "waiting_pickup",
+      "eating",
+      "walking_in",
+    ];
+    const cards = (state.queue || []).filter((c) => showPhases.includes(c.phase));
+
+    // sort: takeaway waiting first, then seated needing order, then others
+    const rank = (c) => {
+      if (c.phase === "waiting" && c.service === "takeaway") return 0;
+      if (c.phase === "seated_ready") return 1;
+      if (c.phase === "waiting_pickup") return 2;
+      if (c.phase === "waiting_food") return 3;
+      if (c.phase === "waiting_table") return 4;
+      if (c.phase === "eating") return 5;
+      return 6;
+    };
+    cards.sort((a, b) => rank(a) - rank(b));
+
+    const firstTakeaway = cards.find(
+      (c) => c.phase === "waiting" && c.service === "takeaway"
+    );
+
+    cards.forEach((c) => {
       const pct = Math.max(0, (c.patience / c.maxPatience) * 100);
       const div = document.createElement("div");
-      div.className = "customer-card" + (i === 0 ? " first" : "");
+      div.className =
+        "customer-card" +
+        (c === firstTakeaway || c.phase === "seated_ready" ? " first" : "") +
+        (c.phase === "walking_in" ? " walking" : "") +
+        (c.service === "dinein" ? " dinein" : " takeaway");
       div.dataset.id = c.id;
       const typeHint =
         c.order.type === "combo" ? "🧋+🍪" : c.order.type === "snack" ? "🍪" : "🧋";
+      const phaseHint =
+        c.phase === "walking_in"
+          ? "🚶 Đang vào…"
+          : c.phase === "waiting_table"
+          ? "⏳ Chờ bàn"
+          : c.phase === "seated_ready"
+          ? "🪑 Chờ nhận đơn"
+          : c.phase === "waiting_food"
+          ? "🍜 Chờ bưng món"
+          : c.phase === "waiting_pickup"
+          ? "🛍️ Chờ túi"
+          : c.phase === "eating"
+          ? "😋 Đang dùng"
+          : "chờ quầy";
+
+      let action = `<span class="muted small">${phaseHint}</span>`;
+      if (
+        !state.currentCustomer &&
+        ((c.phase === "waiting" && c.service === "takeaway" && c === firstTakeaway) ||
+          c.phase === "seated_ready")
+      ) {
+        action = `<button class="btn btn-sm btn-primary take-btn">Nhận đơn</button>`;
+      }
+
       div.innerHTML = `
         <div class="cust-emoji">${c.emoji}</div>
         <div class="cust-info">
-          <div class="cust-name">${c.name}${c.isNPC ? " · " + c.npcRole : ""} ${typeHint}</div>
-          <div class="patience"><div class="patience-fill" style="width:${pct}%"></div></div>
+          <div class="cust-name">${c.name}${c.isNPC ? " · " + c.npcRole : ""}
+            ${this.serviceBadge(c.service)} ${typeHint}</div>
+          <div class="muted small">${Game.orderTicketText(c.order)}</div>
+          ${
+            c.phase !== "walking_in" && c.phase !== "eating"
+              ? `<div class="patience"><div class="patience-fill" style="width:${pct}%"></div></div>`
+              : `<div class="muted small">${phaseHint}</div>`
+          }
         </div>
-        ${
-          i === 0 && !state.currentCustomer
-            ? `<button class="btn btn-sm btn-primary take-btn">Nhận</button>`
-            : i === 0
-            ? `<span class="muted small">Đang phục vụ</span>`
-            : `<span class="muted small">chờ</span>`
-        }
+        ${action}
       `;
       const btn = div.querySelector(".take-btn");
       if (btn) btn.onclick = () => handlers.takeOrder(c.id);
       list.appendChild(div);
     });
+  },
 
-    (state.queue || [])
-      .filter((c) => c.phase === "walking_in")
-      .forEach((c) => {
-        const div = document.createElement("div");
-        div.className = "customer-card walking";
-        div.innerHTML = `
-          <div class="cust-emoji">${c.emoji}</div>
-          <div class="cust-info">
-            <div class="cust-name">${c.name}</div>
-            <div class="muted small">🚶 Đang đi vào…</div>
-          </div>
-        `;
-        list.appendChild(div);
-      });
+  renderReadyTray(state, handlers) {
+    const box = document.getElementById("ready-tray");
+    if (!box) return;
+    const trays = state.readyTray || [];
+    if (!trays.length) {
+      box.innerHTML = "";
+      return;
+    }
+    box.innerHTML =
+      `<div class="ready-title">Món sẵn sàng</div>` +
+      trays
+        .map((t) => {
+          const cust =
+            (state.queue || []).find((c) => c.id === t.customerId) ||
+            null;
+          const name = cust ? cust.name : "?";
+          const label =
+            t.service === "dinein"
+              ? `🍽️ Bưng → ${t.tableId || "bàn"}`
+              : `🛍️ Giao mang đi`;
+          return `<div class="ready-row">
+            <span>${Game.orderTicketText(t.order)} · ${name}</span>
+            <button class="btn btn-sm btn-secondary" data-tray="${t.id}">${label}</button>
+          </div>`;
+        })
+        .join("");
+    box.querySelectorAll("[data-tray]").forEach((btn) => {
+      btn.onclick = () => handlers.serveReady(btn.getAttribute("data-tray"));
+    });
   },
 
   renderCounter(state, handlers) {
     const area = document.getElementById("counter-area");
     if (!area) return;
     if (!state.currentCustomer) {
-      area.innerHTML = `<div class="empty-counter">🧋<p>Chọn khách đã tới quầy để nhận đơn</p></div>`;
+      area.innerHTML = `<div class="empty-counter">🧋<p>Nhận đơn mang đi ở quầy hoặc đơn bàn (Tại chỗ)</p></div>`;
       return;
     }
     const c = state.currentCustomer;
@@ -449,9 +744,9 @@ const UI = {
       <div class="serving">
         <div class="serving-face">${c.emoji}</div>
         <div>
-          <strong>${c.name}</strong> ${this.orderTypeBadge(o.type)}
+          <strong>${c.name}</strong> ${this.serviceBadge(c.service)} ${this.orderTypeBadge(o.type)}
           <div class="wanted">${wanted}</div>
-          <p class="muted small">${detail}</p>
+          <p class="muted small">${detail}${c.tableId ? " · " + c.tableId : ""}</p>
         </div>
       </div>
       <div class="counter-actions">
@@ -475,7 +770,25 @@ const UI = {
     const area = document.getElementById("order-area");
     if (!area) return;
     if (!state.currentCustomer) {
-      area.innerHTML = `<p class="muted">Chưa có đơn.</p>`;
+      // show next pending tickets summary
+      const pending = (state.queue || []).filter((c) =>
+        ["seated_ready", "waiting", "waiting_food", "waiting_pickup"].includes(c.phase)
+      );
+      if (!pending.length) {
+        area.innerHTML = `<p class="muted">Chưa có đơn.</p>`;
+        return;
+      }
+      area.innerHTML =
+        `<p class="muted small">Vé đang chờ:</p>` +
+        pending
+          .slice(0, 4)
+          .map(
+            (c) =>
+              `<div class="mini-ticket">${this.serviceBadge(c.service)} ${this.orderTypeBadge(
+                c.order.type
+              )} ${Game.orderTicketText(c.order)}</div>`
+          )
+          .join("");
       return;
     }
     const o = state.currentCustomer.order;
@@ -505,9 +818,10 @@ const UI = {
         </ul>`;
     }
     const price = Game.orderPrice(o);
+    const c = state.currentCustomer;
     area.innerHTML = `
       <div class="order-ticket">
-        ${this.orderTypeBadge(o.type)}
+        ${this.serviceBadge(c.service)} ${this.orderTypeBadge(o.type)}
         ${body}
         <ul class="ticket-list"><li class="price">💵 ${this.money(price)}</li></ul>
         <p class="hint small">Mở 📖 Menu nếu quên!</p>
@@ -836,6 +1150,9 @@ const UI = {
             ${goalMet ? "✅" : "❌"}</li>
           <li>Khách phục vụ: <b>${summary.served}</b>
             ${summary.snacks || summary.combos ? ` · snack ${summary.snacks || 0} · combo ${summary.combos || 0}` : ""}</li>
+          <li>Tại chỗ: <b>${summary.dineIn || 0}</b> · Mang đi: <b>${summary.takeaway || 0}</b>
+            ${summary.cleaned ? ` · đã dọn ${summary.cleaned} bàn` : ""}</li>
+          <li>Nhân viên hôm nay: <b>${summary.staff || 0}</b></li>
           <li>Hoàn hảo: <b>${summary.perfect}</b> · Sai: <b>${summary.wrong}</b> · Bỏ đi: <b>${summary.left}</b></li>
           <li>Tip nhận: <b>${this.money(summary.tips)}</b></li>
           <li>Uy tín: <b>${this.stars(summary.rep)}</b> (${summary.repDelta >= 0 ? "+" : ""}${summary.repDelta.toFixed(1)})</li>
@@ -868,6 +1185,8 @@ const UI = {
     this.root.classList.add("screen-upgrade");
     const fx = getEffects(state.upgrades);
     const disc = fx.stockDiscount || 0;
+    const slots = maxStaffSlots(state.day);
+    const hired = staffCount(state.staff);
 
     const upRows = DEVICES.map((d) => {
       const lv = state.upgrades[d.id] | 0;
@@ -895,7 +1214,7 @@ const UI = {
       </div>`;
     }).join("");
 
-    const stockSection = (cat, title) =>
+    const stockSection = (cat) =>
       Object.values(INGREDIENTS)
         .filter((ing) => ing.cat === cat)
         .map((ing) => {
@@ -915,22 +1234,54 @@ const UI = {
         })
         .join("");
 
+    const staffRows = STAFF_ROLES.map((r) => {
+      const locked = state.day < r.unlockDay;
+      const on = !!(state.staff && state.staff[r.id]);
+      const wage = staffWage(r, state.day);
+      const fee = Math.round(wage * 0.5);
+      let btn = "";
+      if (locked) {
+        btn = `<button class="btn btn-sm btn-ghost" disabled>Ngày ${r.unlockDay}</button>`;
+      } else if (on) {
+        btn = `<button class="btn btn-sm btn-ghost" data-fire="${r.id}">Cho nghỉ</button>`;
+      } else {
+        const full = hired >= slots;
+        btn = `<button class="btn btn-sm btn-secondary" data-hire="${r.id}" ${
+          full || state.money < fee ? "disabled" : ""
+        }>Thuê · ${this.money(fee)}</button>`;
+      }
+      return `<div class="upgrade-row staff-row">
+        <div>
+          <div>${r.emoji} <b>${r.name}</b> ${on ? '<span class="level-pill">Đang làm</span>' : ""}</div>
+          <div class="muted small">${r.blurb}</div>
+          <div class="muted small">Lương/ngày: <b>${this.money(wage)}</b> (trừ lúc mở quán)</div>
+        </div>
+        ${btn}
+      </div>`;
+    }).join("");
+
     const nextLabel =
       state.day >= GAME_CONFIG.totalDays
         ? "Xem kết thúc →"
         : `Sang Ngày ${state.day + 1} →`;
 
+    const tablePreview = tableCount(state.day + (state.day < GAME_CONFIG.totalDays ? 1 : 0), state.upgrades);
+
     this.root.innerHTML = `
-      <div class="upgrade-layout">
+      <div class="upgrade-layout upgrade-layout-v3">
         <div class="card">
           <h2>⬆️ Thiết bị (Cấp 0→4)</h2>
           <p class="muted">Tiền: <b>${this.money(state.money)}</b>${
       disc ? ` · Giảm giá kho ${Math.round(disc * 100)}%` : ""
-    }</p>
+    }
+            · Bàn ngày mai ~${tablePreview}</p>
           <div class="upgrade-list">${upRows}</div>
         </div>
         <div class="card">
-          <h2>🛒 Nhập hàng</h2>
+          <h2>👥 Thuê nhân viên</h2>
+          <p class="muted small">Slot: <b>${hired}/${slots}</b> · Ngày 1–2 tự làm; nhân viên hữu ích khi bàn đông.</p>
+          <div class="staff-list">${staffRows || "<p class='muted'>Chưa mở thuê.</p>"}</div>
+          <h2 class="pad-top">🛒 Nhập hàng</h2>
           <h3 class="menu-sec">Nguyên liệu trà</h3>
           <div class="stock-list">${stockSection("drink")}</div>
           <h3 class="menu-sec">Nguyên liệu ăn nhẹ</h3>
@@ -949,7 +1300,54 @@ const UI = {
       btn.onclick = () =>
         handlers.buyStock(btn.getAttribute("data-buy"), parseInt(btn.getAttribute("data-qty"), 10));
     });
+    this.root.querySelectorAll("[data-hire]").forEach((btn) => {
+      btn.onclick = () => handlers.hireStaff(btn.getAttribute("data-hire"));
+    });
+    this.root.querySelectorAll("[data-fire]").forEach((btn) => {
+      btn.onclick = () => handlers.fireStaff(btn.getAttribute("data-fire"));
+    });
     document.getElementById("btn-next-day").onclick = handlers.nextDay;
+  },
+
+  renderStaffModal(state, handlers) {
+    const slots = maxStaffSlots(state.day);
+    const hired = staffCount(state.staff);
+    const rows = STAFF_ROLES.map((r) => {
+      const locked = state.day < r.unlockDay;
+      const on = !!(state.staff && state.staff[r.id]);
+      const wage = staffWage(r, state.day);
+      const fee = Math.round(wage * 0.5);
+      let action = "";
+      if (locked) action = `<span class="muted small">Mở ngày ${r.unlockDay}</span>`;
+      else if (on)
+        action = `<button class="btn btn-sm btn-ghost" data-fire="${r.id}">Cho nghỉ</button>`;
+      else
+        action = `<button class="btn btn-sm btn-secondary" data-hire="${r.id}" ${
+          hired >= slots || state.money < fee ? "disabled" : ""
+        }>Thuê · ${this.money(fee)}</button>`;
+      return `<div class="upgrade-row">
+        <div>
+          <div>${r.emoji} <b>${r.name}</b> ${on ? "✓" : ""}</div>
+          <div class="muted small">${r.blurb}</div>
+          <div class="muted small">Lương/ngày ${this.money(wage)}</div>
+        </div>
+        ${action}
+      </div>`;
+    }).join("");
+
+    this.modal(`
+      <h2>👥 Nhân viên</h2>
+      <p class="muted small">Đang thuê ${hired}/${slots}. Lương trừ khi mở quán mỗi ngày.</p>
+      <div>${rows}</div>
+      <button class="btn btn-primary" id="modal-close">Đóng</button>
+    `);
+    document.getElementById("modal-close").onclick = handlers.close;
+    document.querySelectorAll("#modal-root-global [data-hire]").forEach((btn) => {
+      btn.onclick = () => handlers.hireStaff(btn.getAttribute("data-hire"));
+    });
+    document.querySelectorAll("#modal-root-global [data-fire]").forEach((btn) => {
+      btn.onclick = () => handlers.fireStaff(btn.getAttribute("data-fire"));
+    });
   },
 
   /* ---------- WIN / ENDING ---------- */
@@ -980,7 +1378,14 @@ const UI = {
           <li>Đánh giá TB: <b>${avg}/5</b> (${lt.starCount || 0} lượt)</li>
           <li>Khách phục vụ: <b>${lt.served || 0}</b></li>
           <li>Nâng cấp thiết bị: <b>${ownedLevels}/${maxLevels}</b> cấp</li>
+          <li>Nhân viên (đỉnh điểm): <b>${staffCount(state.staff)} / peak ${lt.peakStaff || staffCount(state.staff)}</b></li>
         </ul>
+        <div class="staff-win">${
+          STAFF_ROLES.map((r) => {
+            const on = state.staff && state.staff[r.id];
+            return `<span class="staff-chip ${on ? "on" : "off"}">${r.emoji} ${r.name}${on ? " ✓" : ""}</span>`;
+          }).join(" ")
+        }</div>
         <details class="device-details">
           <summary>Chi tiết thiết bị</summary>
           <ul class="summary-list compact">${deviceLines}</ul>
@@ -1019,6 +1424,7 @@ const UI = {
             </div>`
           : ""
       }
+      ${result.serviceTag ? `<p class="muted small">${result.serviceTag}</p>` : ""}
       <p>${result.payText || ""}</p>
       <button class="btn btn-primary" id="modal-close">OK</button>
     `);
