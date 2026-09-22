@@ -592,3 +592,45 @@ h1, h2, h3 { margin: 0 0 0.5rem; font-weight: 700; }
 @media (max-width: 900px) {
   .shop-floor { height: 140px; }
 }
+
+/* ===== Expansion: snacks, devices, badges ===== */
+.badge-drink { background: #ddd6fe; color: #5b21b6; }
+.badge-snack { background: #fde68a; color: #92400e; }
+.badge-combo { background: #bbf7d0; color: #065f46; }
+
+.level-pill {
+  display: inline-block;
+  background: #fce7f3;
+  color: #9d174d;
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 1px 8px;
+  border-radius: 999px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+.level-pips {
+  font-size: 0.7rem;
+  letter-spacing: 1px;
+  color: var(--pink-deep);
+  margin-left: 4px;
+}
+.effect-line { margin-top: 2px; }
+.menu-sec {
+  font-size: 0.95rem;
+  margin: 12px 0 6px;
+  color: var(--pink-deep);
+}
+.snack-title { margin-top: 10px; padding-top: 8px; border-top: 1px dashed #fcd34d; }
+.snack-sum { color: #92400e; font-weight: 600; }
+.step-tab.snack-tab { background: #fef3c7; }
+.step-tab.snack-tab.active { background: #f59e0b; color: #fff; }
+.device-details { margin: 12px 0; text-align: left; }
+.device-details summary { cursor: pointer; font-weight: 600; color: var(--muted); }
+.summary-list.compact li { padding: 4px 0; font-size: 0.9rem; }
+.pad-top { margin-top: 8px; }
+
+.upgrade-list { max-height: 62vh; overflow: auto; }
+.stock-list { max-height: 28vh; overflow: auto; margin-bottom: 8px; }
+
+.screen-upgrade .card { max-height: none; }

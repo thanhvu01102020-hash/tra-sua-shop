@@ -1,45 +1,35 @@
 # Tiệm Trà Nhà Mình 🧋
 
-Game mô phỏng quán trà sữa indie (MVP Ngày 1–3): pha chế, quản lý quán, và câu chuyện nhẹ. Toàn bộ giao diện tiếng Việt.
+Game mô phỏng quán trà sữa indie: pha chế, món ăn nhẹ, nâng cấp thiết bị (Cấp 0→4), và câu chuyện nhẹ qua **30 ngày**. Toàn bộ giao diện tiếng Việt.
 
 ## Cách mở
 
 ### Cách 1 — Mở file trực tiếp
 1. Vào thư mục `tra-sua-shop`
-2. Mở `index.html` bằng trình duyệt (Chrome / Firefox / Edge)
-3. Đường dẫn dạng: `file:///.../tra-sua-shop/index.html`
+2. Mở `index.html` bằng trình duyệt
 
-### Cách 2 — Máy chủ tĩnh (khuyến nghị nếu `file://` bị hạn chế)
-Trong thư mục `tra-sua-shop`, chạy một trong các lệnh:
-
+### Cách 2 — Máy chủ tĩnh
 ```bash
 python3 -m http.server 8080
 ```
-
-Rồi mở: http://localhost:8080/
-
-Không cần npm, không cần build.
+Mở http://localhost:8080/ — không cần npm.
 
 ## Cách chơi
 
-1. **Màn hình chính** → **Ván mới** → đặt tên tiệm (mặc định *Tiệm Trà Nhà Mình*).
-2. Đọc đoạn chuyện buổi sáng → **Mở quán**.
-3. Khách vào hàng chờ (thanh kiên nhẫn). Bấm **Nhận** ở khách đầu hàng.
-4. Xem đơn → **Pha chế**: chọn base → sữa → topping → đường → đá → lắc/xay.
-5. Đúng công thức + nhanh = tiền đầy đủ + tip; sai = mất uy tín; chậm = khách bỏ đi.
-6. Hết khách → **Kết thúc ngày** → tóm tắt → chuyện tối (có lựa chọn Ngày 1) → nâng cấp / nhập hàng → ngày tiếp.
-7. Tiến trình lưu vào `localStorage` (nút **Tiếp tục** trên màn hình chính).
+1. **Ván mới** → đặt tên tiệm.
+2. Chuyện sáng (ngày then chốt) → **Mở quán**.
+3. Khách đi vào (animation) → **Nhận** → pha trà / chuẩn bị snack / combo.
+4. Đúng + nhanh = tiền + tip + sao 1–5; sai / chậm = mất uy tín.
+5. Hết khách → kết ngày → chuyện tối (có lựa chọn) → nâng cấp thiết bị / nhập hàng → ngày tiếp.
+6. Sau ngày 30: màn hình kết thúc + **Ván mới**. Tiến trình lưu `localStorage` (v2; tự migrate bản cũ).
 
-Mẹo: mở **📖 Công thức** khi quên công thức. Nút 🔊 bật/tắt tiếng bip nhỏ.
+## Nội dung chính
 
-## Có trong MVP
-
-- 6 công thức (mở dần theo ngày): Trà sữa truyền thống, Trà đào, Matcha latte, Hồng trà kem cheese, Trà sữa khoai môn, Cacao sữa đá
-- Vòng lặp Ngày 1–3: chuyện → quán → pha → kết ngày → nâng cấp
-- Tiền, uy tín (sao), kho nguyên liệu, mục tiêu doanh thu ngày
-- 4 nâng cấp: máy lắc nhanh, kệ topping thêm, bảng hiệu, thẻ giảm giá kho
-- 3 NPC: Linh (sinh viên), Anh Hoàng (văn phòng), Chị Mai (hàng xóm)
-- Lưu game, âm thanh tùy chọn (Web Audio)
+- **6 đồ uống** mở dần · **6 món ăn nhẹ** (bánh mì que, tàu hủ, bánh su, khoai chiên, bánh tráng trộn, cookie matcha)
+- Đơn: chỉ trà / chỉ snack / **combo** (combo nhiều hơn ngày sau)
+- **10 thiết bị**, mỗi cái **Cấp 0→4**: máy lắc, máy xay, tủ lạnh, máy pha trà, quầy topping, bảng hiệu, ghế, POS, lò nướng, kệ trưng bày
+- Walk-in animation + đánh giá sao sau phục vụ
+- Chuyện then chốt ngày 1, 3, 7, 14, 21, 30 + lựa chọn nhỏ
 
 ## Cân bằng gợi ý
 
@@ -47,27 +37,27 @@ Mẹo: mở **📖 Công thức** khi quên công thức. Nút 🔊 bật/tắt 
 |-----|---------|
 | Tiền đầu | 80.000đ |
 | Uy tín đầu | 2.5 / 5 |
-| Mục tiêu Ngày 1–3 | 60k / 100k / 150k |
-| Khách/ngày | 4 / 5 / 6 (+nâng cấp bảng hiệu) |
+| Ngày | 1–30 |
+| Mục tiêu DT | ~55k → ~420k (cong mượt) |
+| Khách/ngày | ~4 → ~12 (+ thiết bị) |
 | Thưởng đạt mục tiêu | +10.000đ |
 
-## Cấu trúc thư mục
+## Cấu trúc
 
 ```
 tra-sua-shop/
   index.html
   README.md
   css/style.css
-  js/data.js      — công thức, NPC, chuyện, nâng cấp
-  js/brew.js      — mini-game pha chế
-  js/story.js     — hội thoại
-  js/ui.js        — giao diện
-  js/game.js      — state machine chính
+  js/data.js   — công thức, snack, thiết bị, chuyện, scaling
+  js/brew.js   — pha chế + prep snack
+  js/story.js
+  js/ui.js
+  js/game.js
 ```
 
-## Giới hạn đã biết
+## Giới hạn
 
-- Chỉ 3 ngày (MVP); chưa có mùa / sự kiện dài.
-- Không có hình ảnh ngoài emoji/CSS.
-- Cân bằng tip/uy tín còn đơn giản.
-- Mobile: chơi được nhưng tối ưu quanh ~900px trở lên.
+- Không có asset ngoài emoji/CSS.
+- Combo prep nối tiếp (trà rồi snack), chưa song song thật.
+- Mobile chơi được; tối ưu quanh ≥900px.

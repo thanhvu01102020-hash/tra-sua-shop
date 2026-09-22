@@ -39,6 +39,12 @@ const UI = {
     this.toastTimer = setTimeout(() => el.classList.remove("show"), 2200);
   },
 
+  orderTypeBadge(type) {
+    if (type === "combo") return `<span class="badge badge-combo">Combo</span>`;
+    if (type === "snack") return `<span class="badge badge-snack">Ăn nhẹ</span>`;
+    return `<span class="badge badge-drink">Trà</span>`;
+  },
+
   /* ---------- TITLE ---------- */
   renderTitle(onNew, onContinue, hasSave, shopName) {
     this.clear();
@@ -53,7 +59,7 @@ const UI = {
           <button class="btn btn-primary" id="btn-new">☕ Ván mới</button>
           <button class="btn btn-secondary" id="btn-continue" ${hasSave ? "" : "disabled"}>💾 Tiếp tục</button>
         </div>
-        <p class="hint">Ngày 1–3 · Pha chế · Quản lý · Câu chuyện nhẹ</p>
+        <p class="hint">30 ngày · Trà & món ăn nhẹ · Nâng cấp thiết bị · Câu chuyện nhẹ</p>
         <button class="btn btn-ghost btn-mute" id="btn-mute" title="Âm thanh">🔊</button>
       </div>
     `;
@@ -61,14 +67,13 @@ const UI = {
     document.getElementById("btn-continue").onclick = onContinue;
   },
 
-  /* ---------- NEW GAME NAME ---------- */
   renderNameSetup(onStart, onBack) {
     this.clear();
     this.root.classList.add("screen-setup");
     this.root.innerHTML = `
       <div class="card setup-card">
         <h2>Đặt tên tiệm</h2>
-        <p>Bạn là chủ quán trà sữa nhỏ trong khu phố.</p>
+        <p>Bạn là chủ quán trà sữa nhỏ trong khu phố. Hành trình dài <b>30 ngày</b>.</p>
         <label class="field">
           <span>Tên tiệm</span>
           <input type="text" id="shop-name" maxlength="28" value="${GAME_CONFIG.shopNameDefault}" />
@@ -87,12 +92,20 @@ const UI = {
   },
 
   /* ---------- STORY ---------- */
-  renderStory(beat, lineIndex, onNext, onChoice) {
+  renderStory(beat, lineIndex, phase, onNext, onChoice) {
     this.clear();
     this.root.classList.add("screen-story");
     const line = beat.lines[lineIndex];
     const isLast = lineIndex >= beat.lines.length - 1;
     const showChoice = isLast && beat.choice;
+    const isDay30Evening =
+      phase === "evening" && beat.id && String(beat.id).indexOf("day30") === 0;
+    const nextLabel =
+      phase === "evening"
+        ? isDay30Evening
+          ? "Xem kết thúc →"
+          : "Nâng cấp / nhập hàng →"
+        : "Mở quán →";
 
     this.root.innerHTML = `
       <div class="card story-card">
@@ -117,7 +130,7 @@ const UI = {
     } else {
       const b = document.createElement("button");
       b.className = "btn btn-primary";
-      b.textContent = isLast ? "Mở quán →" : "Tiếp →";
+      b.textContent = isLast ? nextLabel : "Tiếp →";
       b.onclick = onNext;
       actions.appendChild(b);
     }
@@ -127,22 +140,14 @@ const UI = {
   renderShop(state, handlers) {
     this.clear();
     this.root.classList.add("screen-shop");
-    const goal = GAME_CONFIG.dayGoals[state.day - 1] || 150000;
+    const goal = dayGoal(state.day);
     const progress = Math.min(100, (state.dayRevenue / goal) * 100);
-    const waiting = (state.queue || []).filter((c) => c.phase === "waiting");
-    const walking = (state.queue || []).filter((c) => c.phase === "walking_in");
-    const floorEmpty =
-      waiting.length === 0 &&
-      walking.length === 0 &&
-      !(state.departing || []).length &&
-      !state.currentCustomer &&
-      state.customersLeft === 0;
 
     this.root.innerHTML = `
       <header class="hud">
         <div class="hud-left">
           <strong class="shop-name">${state.shopName}</strong>
-          <span class="badge">Ngày ${state.day}/3</span>
+          <span class="badge">Ngày ${state.day}/${GAME_CONFIG.totalDays}</span>
         </div>
         <div class="hud-mid">
           <span title="Tiền">💰 ${this.money(state.money)}</span>
@@ -150,7 +155,7 @@ const UI = {
           <span title="Doanh thu ngày">📈 ${this.money(state.dayRevenue)} / ${this.money(goal)}</span>
         </div>
         <div class="hud-right">
-          <button class="btn btn-ghost btn-sm" id="btn-recipes">📖 Công thức</button>
+          <button class="btn btn-ghost btn-sm" id="btn-recipes">📖 Menu</button>
           <button class="btn btn-ghost btn-sm" id="btn-inv">📦 Kho</button>
           <button class="btn btn-ghost btn-sm" id="btn-mute-shop">🔊</button>
         </div>
@@ -183,7 +188,7 @@ const UI = {
 
       <div class="shop-layout">
         <section class="panel queue-panel">
-          <h3>Hàng chờ <span class="muted" id="queue-count">(${waiting.length})</span></h3>
+          <h3>Hàng chờ <span class="muted" id="queue-count">(0)</span></h3>
           <div id="queue-list" class="queue-list"></div>
           <div id="queue-meta"></div>
         </section>
@@ -220,7 +225,6 @@ const UI = {
   },
 
   actorLeftPct(c) {
-    // map 0..1 pos to ~8%..82% of floor width
     const p = Math.max(0, Math.min(1, c.pos != null ? c.pos : 0));
     return 8 + p * 74;
   },
@@ -270,7 +274,6 @@ const UI = {
     const actors = this.allFloorActors(state);
     const ids = new Set(actors.map((c) => c.id));
 
-    // remove gone
     [...box.querySelectorAll(".floor-sprite")].forEach((el) => {
       if (!ids.has(el.dataset.id)) el.remove();
     });
@@ -327,7 +330,6 @@ const UI = {
         fills[i].style.width = Math.max(0, (c.patience / c.maxPatience) * 100) + "%";
       }
     });
-    // floor patience
     waiting.forEach((c) => {
       const el = document.querySelector(`.floor-sprite[data-id="${c.id}"] .patience-fill`);
       if (el) el.style.width = Math.max(0, (c.patience / c.maxPatience) * 100) + "%";
@@ -385,10 +387,12 @@ const UI = {
       const div = document.createElement("div");
       div.className = "customer-card" + (i === 0 ? " first" : "");
       div.dataset.id = c.id;
+      const typeHint =
+        c.order.type === "combo" ? "🧋+🍪" : c.order.type === "snack" ? "🍪" : "🧋";
       div.innerHTML = `
         <div class="cust-emoji">${c.emoji}</div>
         <div class="cust-info">
-          <div class="cust-name">${c.name}${c.isNPC ? " · " + c.npcRole : ""}</div>
+          <div class="cust-name">${c.name}${c.isNPC ? " · " + c.npcRole : ""} ${typeHint}</div>
           <div class="patience"><div class="patience-fill" style="width:${pct}%"></div></div>
         </div>
         ${
@@ -404,7 +408,6 @@ const UI = {
       list.appendChild(div);
     });
 
-    // also show walking_in as non-orderable previews
     (state.queue || [])
       .filter((c) => c.phase === "walking_in")
       .forEach((c) => {
@@ -429,18 +432,32 @@ const UI = {
       return;
     }
     const c = state.currentCustomer;
-    const r = c.order.recipe;
+    const o = c.order;
+    let wanted = "";
+    let detail = "";
+    if (o.type === "drink") {
+      wanted = `${o.recipe.emoji} <b>${o.recipe.name}</b>`;
+      detail = `${this.sugarIceLabel(o.recipe)} · ${Brew.methodLabel(o.recipe.method)}`;
+    } else if (o.type === "snack") {
+      wanted = `${o.snack.emoji} <b>${o.snack.name}</b>`;
+      detail = Brew.methodLabel(o.snack.method);
+    } else {
+      wanted = `${o.recipe.emoji} <b>${o.recipe.name}</b> + ${o.snack.emoji} <b>${o.snack.name}</b>`;
+      detail = `Combo · ${Brew.methodLabel(o.recipe.method)} + ${Brew.methodLabel(o.snack.method)}`;
+    }
     area.innerHTML = `
       <div class="serving">
         <div class="serving-face">${c.emoji}</div>
         <div>
-          <strong>${c.name}</strong> muốn
-          <div class="wanted">${r.emoji} <b>${r.name}</b></div>
-          <p class="muted small">${this.sugarIceLabel(r)} · ${r.method === "shake" ? "Lắc" : "Xay"}</p>
+          <strong>${c.name}</strong> ${this.orderTypeBadge(o.type)}
+          <div class="wanted">${wanted}</div>
+          <p class="muted small">${detail}</p>
         </div>
       </div>
       <div class="counter-actions">
-        <button class="btn btn-primary" id="btn-brew">🧪 Pha chế</button>
+        <button class="btn btn-primary" id="btn-brew">${
+          o.type === "snack" ? "🍪 Chuẩn bị" : o.type === "combo" ? "🧪 Pha + chuẩn bị" : "🧪 Pha chế"
+        }</button>
         <button class="btn btn-ghost" id="btn-cancel-order">Huỷ (mất uy tín)</button>
       </div>
     `;
@@ -461,22 +478,39 @@ const UI = {
       area.innerHTML = `<p class="muted">Chưa có đơn.</p>`;
       return;
     }
-    const r = state.currentCustomer.order.recipe;
-    const base = BASES.find((b) => b.id === r.base);
-    const milk = MILKS.find((m) => m.id === r.milk);
-    const top = TOPPINGS.find((t) => t.id === r.topping);
-    area.innerHTML = `
-      <div class="order-ticket">
+    const o = state.currentCustomer.order;
+    let body = "";
+    if (o.recipe) {
+      const r = o.recipe;
+      const base = BASES.find((b) => b.id === r.base);
+      const milk = MILKS.find((m) => m.id === r.milk);
+      const top = TOPPINGS.find((t) => t.id === r.topping);
+      body += `
         <div class="ticket-title">${r.emoji} ${r.name}</div>
         <ul class="ticket-list">
           <li>${base?.emoji || ""} Base: <b>${base?.name}</b></li>
           <li>${milk?.emoji || ""} Sữa: <b>${milk?.name}</b></li>
           <li>${top?.emoji || ""} Topping: <b>${top?.name}</b></li>
           <li>🍬 ${this.sugarIceLabel(r)}</li>
-          <li>🔄 ${r.method === "shake" ? "Lắc tay" : "Xay blend"}</li>
-          <li class="price">💵 ${this.money(r.price)}</li>
-        </ul>
-        <p class="hint small">Mở 📖 Công thức nếu quên!</p>
+          <li>🔄 ${Brew.methodLabel(r.method)}</li>
+        </ul>`;
+    }
+    if (o.snack) {
+      const sn = o.snack;
+      body += `
+        <div class="ticket-title snack-title">${sn.emoji} ${sn.name}</div>
+        <ul class="ticket-list">
+          <li>Cách làm: <b>${Brew.methodLabel(sn.method)}</b></li>
+          <li class="muted small">${sn.desc}</li>
+        </ul>`;
+    }
+    const price = Game.orderPrice(o);
+    area.innerHTML = `
+      <div class="order-ticket">
+        ${this.orderTypeBadge(o.type)}
+        ${body}
+        <ul class="ticket-list"><li class="price">💵 ${this.money(price)}</li></ul>
+        <p class="hint small">Mở 📖 Menu nếu quên!</p>
       </div>
     `;
   },
@@ -486,23 +520,29 @@ const UI = {
     this.clear();
     this.root.classList.add("screen-brew");
     const step = Brew.currentStep(session);
-    const r = session.order.recipe;
+    const o = session.order;
+    const title =
+      o.type === "snack"
+        ? `${o.snack.emoji} ${o.snack.name}`
+        : o.type === "combo"
+        ? `${o.recipe.emoji}+${o.snack.emoji} Combo`
+        : `${o.recipe.emoji} ${o.recipe.name}`;
     const elapsed = ((Date.now() - session.startTime) / 1000).toFixed(0);
 
     this.root.innerHTML = `
       <header class="hud brew-hud">
-        <div><strong>Pha: ${r.emoji} ${r.name}</strong> cho ${state.currentCustomer.name}</div>
-        <div>⏱ ${elapsed}s · Bước ${session.stepIndex + 1}/${Brew.steps.length}</div>
+        <div><strong>${o.type === "snack" ? "Chuẩn bị" : "Pha"}: ${title}</strong> cho ${state.currentCustomer.name}</div>
+        <div>⏱ ${elapsed}s · Bước ${session.stepIndex + 1}/${session.steps.length}</div>
         <button class="btn btn-ghost btn-sm" id="btn-brew-book">📖</button>
       </header>
       <div class="brew-layout">
         <div class="card brew-steps">
           <div class="step-tabs" id="step-tabs"></div>
-          <h3>${Brew.stepLabels[step]}</h3>
+          <h3>${Brew.stepLabels[step] || step}</h3>
           <div id="brew-options" class="brew-options"></div>
           <div class="brew-nav">
             <button class="btn btn-ghost" id="btn-brew-back" ${session.stepIndex === 0 || session.methodActive ? "disabled" : ""}>← Lùi</button>
-            <button class="btn btn-secondary" id="btn-brew-next" ${step === "method" ? "disabled" : ""}>Tiếp →</button>
+            <button class="btn btn-secondary" id="btn-brew-next" ${step === "method" || step === "snack_method" ? "disabled" : ""}>Tiếp →</button>
           </div>
         </div>
         <div class="card brew-summary">
@@ -518,12 +558,16 @@ const UI = {
     document.getElementById("btn-brew-back").onclick = handlers.brewBack;
     document.getElementById("btn-brew-next").onclick = handlers.brewNext;
 
-    // tabs
     const tabs = document.getElementById("step-tabs");
-    Brew.steps.forEach((st, i) => {
+    session.steps.forEach((st, i) => {
       const t = document.createElement("span");
-      t.className = "step-tab" + (i === session.stepIndex ? " active" : "") + (i < session.stepIndex ? " done" : "");
+      t.className =
+        "step-tab" +
+        (i === session.stepIndex ? " active" : "") +
+        (i < session.stepIndex ? " done" : "") +
+        (st.startsWith("snack") ? " snack-tab" : "");
       t.textContent = i + 1;
+      t.title = Brew.stepLabels[st] || st;
       tabs.appendChild(t);
     });
 
@@ -538,14 +582,48 @@ const UI = {
     box.innerHTML = "";
 
     if (step === "method") {
+      const m = session.order.recipe.method;
       box.innerHTML = `
-        <p>Công thức cần: <b>${session.order.recipe.method === "shake" ? "Lắc tay 🥤" : "Xay blend 🌀"}</b></p>
+        <p>Công thức cần: <b>${Brew.methodLabel(m)}</b></p>
         <button class="btn btn-primary btn-lg" id="btn-start-method">
-          Bắt đầu ${session.order.recipe.method === "shake" ? "lắc" : "xay"}!
+          Bắt đầu ${m === "shake" ? "lắc" : "xay"}!
         </button>
         <p class="hint">Bấm liên tục hoặc giữ nhịp để đầy thanh.</p>
       `;
       document.getElementById("btn-start-method").onclick = handlers.startMethod;
+      return;
+    }
+
+    if (step === "snack_method") {
+      const m = session.order.snack.method;
+      const verb =
+        m === "oven" ? "nướng" : m === "fry" ? "chiên" : "trình bày";
+      box.innerHTML = `
+        <p>Snack cần: <b>${Brew.methodLabel(m)}</b></p>
+        <button class="btn btn-primary btn-lg" id="btn-start-method">
+          Bắt đầu ${verb}!
+        </button>
+        <p class="hint">Bấm để đẩy tiến độ chế biến (lò / chảo / đĩa).</p>
+      `;
+      document.getElementById("btn-start-method").onclick = handlers.startMethod;
+      return;
+    }
+
+    if (step === "snack_pick") {
+      const unlocked = SNACKS.filter((s) => s.unlockDay <= state.day);
+      unlocked.forEach((opt) => {
+        const can = Brew.canAffordSnack(state.inventory, opt);
+        const selected = session.selections.snack_pick === opt.id;
+        const btn = document.createElement("button");
+        btn.className = "opt-btn" + (selected ? " selected" : "") + (!can ? " disabled" : "");
+        btn.disabled = !can;
+        const miss = (opt.ingredients || [])
+          .map((id) => `${INGREDIENTS[id]?.emoji || ""} ${state.inventory[id] || 0}`)
+          .join(" · ");
+        btn.innerHTML = `<span class="opt-emoji">${opt.emoji}</span><span>${opt.name}</span><span class="muted small">${Brew.methodLabel(opt.method)} · ${miss}</span>`;
+        btn.onclick = () => handlers.selectBrew("snack_pick", opt.id);
+        box.appendChild(btn);
+      });
       return;
     }
 
@@ -563,15 +641,12 @@ const UI = {
       btn.className = "opt-btn" + (selected ? " selected" : "") + (!can ? " disabled" : "");
       btn.disabled = !can;
       const stock =
-        opt.ingredient != null
-          ? ` · còn ${state.inventory[opt.ingredient] || 0}`
-          : "";
+        opt.ingredient != null ? ` · còn ${state.inventory[opt.ingredient] || 0}` : "";
       btn.innerHTML = `<span class="opt-emoji">${opt.emoji || ""}</span><span>${opt.name}</span><span class="muted small">${stock}</span>`;
       btn.onclick = () => handlers.selectBrew(step, opt.id);
       box.appendChild(btn);
     });
 
-    // extra topping upgrade
     if (step === "topping" && session.hasExtraTopping) {
       const wrap = document.createElement("div");
       wrap.className = "extra-top";
@@ -593,19 +668,28 @@ const UI = {
     const ul = document.getElementById("sel-summary");
     if (!ul) return;
     const s = session.selections;
-    const base = BASES.find((b) => b.id === s.base);
-    const milk = MILKS.find((m) => m.id === s.milk);
-    const top = TOPPINGS.find((t) => t.id === s.topping);
-    const sugar = SUGAR_LEVELS.find((x) => x.id === s.sugar);
-    const ice = ICE_LEVELS.find((x) => x.id === s.ice);
-    ul.innerHTML = `
-      <li>Base: ${base ? base.emoji + " " + base.name : "—"}</li>
-      <li>Sữa: ${milk ? milk.emoji + " " + milk.name : "—"}</li>
-      <li>Topping: ${top ? top.emoji + " " + top.name : "—"}</li>
-      <li>Đường: ${sugar ? sugar.name : "—"}</li>
-      <li>Đá: ${ice ? ice.name : "—"}</li>
-      <li>Cách: ${s.method ? (s.method === "shake" ? "Lắc" : "Xay") : "—"}</li>
-    `;
+    let html = "";
+    if (session.type === "drink" || session.type === "combo") {
+      const base = BASES.find((b) => b.id === s.base);
+      const milk = MILKS.find((m) => m.id === s.milk);
+      const top = TOPPINGS.find((t) => t.id === s.topping);
+      const sugar = SUGAR_LEVELS.find((x) => x.id === s.sugar);
+      const ice = ICE_LEVELS.find((x) => x.id === s.ice);
+      html += `
+        <li>Base: ${base ? base.emoji + " " + base.name : "—"}</li>
+        <li>Sữa: ${milk ? milk.emoji + " " + milk.name : "—"}</li>
+        <li>Topping: ${top ? top.emoji + " " + top.name : "—"}</li>
+        <li>Đường: ${sugar ? sugar.name : "—"}</li>
+        <li>Đá: ${ice ? ice.name : "—"}</li>
+        <li>Cách: ${s.method ? Brew.methodLabel(s.method) : "—"}</li>`;
+    }
+    if (session.type === "snack" || session.type === "combo") {
+      const sn = SNACKS.find((x) => x.id === s.snack_pick);
+      html += `
+        <li class="snack-sum">Snack: ${sn ? sn.emoji + " " + sn.name : "—"}</li>
+        <li>Chế biến: ${s.snack_method ? Brew.methodLabel(s.snack_method) : "—"}</li>`;
+    }
+    ul.innerHTML = html;
   },
 
   renderMethodZone(session, handlers) {
@@ -615,11 +699,26 @@ const UI = {
       zone.innerHTML = "";
       return;
     }
+    let label = "Đang xử lý...";
+    if (session.methodKind === "snack") {
+      const m = session.order.snack.method;
+      label = m === "oven" ? "Đang nướng..." : m === "fry" ? "Đang chiên..." : "Đang bày đĩa...";
+    } else if (session.order.recipe) {
+      label = session.order.recipe.method === "shake" ? "Đang lắc..." : "Đang xay...";
+    }
+    const btnLabel =
+      session.methodKind === "snack"
+        ? session.order.snack.method === "oven"
+          ? "🔥 Nướng!"
+          : session.order.snack.method === "fry"
+          ? "🍟 Chiên!"
+          : "🍽️ Bày!"
+        : "🥤 Bấm!";
     zone.innerHTML = `
       <div class="method-bar-wrap">
-        <div class="method-label">${session.order.recipe.method === "shake" ? "Đang lắc..." : "Đang xay..."}</div>
+        <div class="method-label">${label}</div>
         <div class="method-bar"><div class="method-fill" id="method-fill" style="width:${session.methodProgress}%"></div></div>
-        <button class="btn btn-primary btn-lg" id="btn-shake-click">🥤 Bấm!</button>
+        <button class="btn btn-primary btn-lg" id="btn-shake-click">${btnLabel}</button>
       </div>
     `;
     const btn = document.getElementById("btn-shake-click");
@@ -633,7 +732,6 @@ const UI = {
 
   /* ---------- MODALS ---------- */
   modal(html) {
-    // Prefer body-level overlay so SHOP re-renders (walk animations) don't wipe it
     let root = document.getElementById("modal-root-global");
     if (!root) {
       root = document.createElement("div");
@@ -641,7 +739,6 @@ const UI = {
       document.body.appendChild(root);
     }
     root.innerHTML = `<div class="modal-backdrop"><div class="modal card">${html}</div></div>`;
-    // also clear in-app modal hole if present
     const local = document.getElementById("modal-root");
     if (local) local.innerHTML = "";
     return root;
@@ -660,29 +757,54 @@ const UI = {
   },
 
   renderRecipesModal(state, onClose) {
-    const unlocked = RECIPES.filter((r) => r.unlockDay <= state.day);
-    const items = unlocked
+    const drinks = RECIPES.filter((r) => r.unlockDay <= state.day)
       .map((r) => {
         const base = BASES.find((b) => b.id === r.base)?.name;
         const milk = MILKS.find((m) => m.id === r.milk)?.name;
         const top = TOPPINGS.find((t) => t.id === r.topping)?.name;
         return `<div class="recipe-row">
           <div class="recipe-title">${r.emoji} <b>${r.name}</b> · ${this.money(r.price)}</div>
-          <div class="muted small">${base} + ${milk} + ${top} · ${this.sugarIceLabel(r)} · ${r.method === "shake" ? "Lắc" : "Xay"}</div>
-          <div class="muted small">${r.desc}</div>
+          <div class="muted small">${base} + ${milk} + ${top} · ${this.sugarIceLabel(r)} · ${Brew.methodLabel(r.method)}</div>
         </div>`;
       })
       .join("");
+
+    const snacks = SNACKS.filter((s) => s.unlockDay <= state.day)
+      .map((s) => {
+        return `<div class="recipe-row">
+          <div class="recipe-title">${s.emoji} <b>${s.name}</b> · ${this.money(s.price)}</div>
+          <div class="muted small">${Brew.methodLabel(s.method)} · ${s.desc}</div>
+        </div>`;
+      })
+      .join("");
+
+    const lockedSnacks = SNACKS.filter((s) => s.unlockDay > state.day)
+      .map((s) => `<div class="muted small">🔒 ${s.emoji} ${s.name} (ngày ${s.unlockDay})</div>`)
+      .join("");
+
     this.modal(`
-      <h2>📖 Sổ công thức</h2>
-      <div class="recipe-list">${items}</div>
+      <h2>📖 Menu</h2>
+      <h3 class="menu-sec">🧋 Đồ uống</h3>
+      <div class="recipe-list">${drinks}</div>
+      <h3 class="menu-sec">🍪 Món ăn nhẹ</h3>
+      <div class="recipe-list">${snacks || "<p class='muted'>Chưa mở món ăn nhẹ.</p>"}</div>
+      ${lockedSnacks ? `<div class="pad-top">${lockedSnacks}</div>` : ""}
       <button class="btn btn-primary" id="modal-close">Đóng</button>
     `);
     document.getElementById("modal-close").onclick = onClose;
   },
 
   renderInventoryModal(state, onClose) {
-    const rows = Object.values(INGREDIENTS)
+    const drinkRows = Object.values(INGREDIENTS)
+      .filter((ing) => ing.cat === "drink")
+      .map((ing) => {
+        const qty = state.inventory[ing.id] || 0;
+        const low = qty <= 2 ? " low" : "";
+        return `<div class="inv-row${low}"><span>${ing.emoji} ${ing.name}</span><span>${qty}</span></div>`;
+      })
+      .join("");
+    const snackRows = Object.values(INGREDIENTS)
+      .filter((ing) => ing.cat === "snack")
       .map((ing) => {
         const qty = state.inventory[ing.id] || 0;
         const low = qty <= 2 ? " low" : "";
@@ -691,7 +813,10 @@ const UI = {
       .join("");
     this.modal(`
       <h2>📦 Kho nguyên liệu</h2>
-      <div class="inv-list">${rows}</div>
+      <h3 class="menu-sec">Trà</h3>
+      <div class="inv-list">${drinkRows}</div>
+      <h3 class="menu-sec">Ăn nhẹ</h3>
+      <div class="inv-list">${snackRows}</div>
       <p class="hint">Nhập hàng sau khi hết ngày.</p>
       <button class="btn btn-primary" id="modal-close">Đóng</button>
     `);
@@ -705,19 +830,32 @@ const UI = {
     const goalMet = summary.revenue >= summary.goal;
     this.root.innerHTML = `
       <div class="card dayend-card">
-        <h2>📅 Kết thúc Ngày ${summary.day}</h2>
+        <h2>📅 Kết thúc Ngày ${summary.day}/${summary.totalDays}</h2>
         <ul class="summary-list">
           <li>Doanh thu: <b>${this.money(summary.revenue)}</b> / mục tiêu ${this.money(summary.goal)}
             ${goalMet ? "✅" : "❌"}</li>
-          <li>Khách phục vụ: <b>${summary.served}</b></li>
+          <li>Khách phục vụ: <b>${summary.served}</b>
+            ${summary.snacks || summary.combos ? ` · snack ${summary.snacks || 0} · combo ${summary.combos || 0}` : ""}</li>
           <li>Hoàn hảo: <b>${summary.perfect}</b> · Sai: <b>${summary.wrong}</b> · Bỏ đi: <b>${summary.left}</b></li>
           <li>Tip nhận: <b>${this.money(summary.tips)}</b></li>
           <li>Uy tín: <b>${this.stars(summary.rep)}</b> (${summary.repDelta >= 0 ? "+" : ""}${summary.repDelta.toFixed(1)})</li>
-          <li>Đánh giá TB: <b>${summary.starCount ? ("★".repeat(Math.round(summary.avgStars)) + "☆".repeat(Math.max(0, 5 - Math.round(summary.avgStars))) + " " + summary.avgStars.toFixed(1) + "/5") : "—"}</b>
+          <li>Đánh giá TB: <b>${
+            summary.starCount
+              ? "★".repeat(Math.round(summary.avgStars)) +
+                "☆".repeat(Math.max(0, 5 - Math.round(summary.avgStars))) +
+                " " +
+                summary.avgStars.toFixed(1) +
+                "/5"
+              : "—"
+          }</b>
             ${summary.starCount ? `(${summary.starCount} lượt)` : ""}</li>
           <li>Tiền hiện có: <b>${this.money(summary.money)}</b></li>
         </ul>
-        <p class="flavor">${goalMet ? "Một ngày tốt đẹp! Quán đang lớn dần." : "Chưa đạt mục tiêu — ngày mai cố thêm nhé!"}</p>
+        <p class="flavor">${
+          goalMet
+            ? "Một ngày tốt đẹp! Quán đang lớn dần."
+            : "Chưa đạt mục tiêu — ngày mai cố thêm nhé!"
+        }</p>
         <button class="btn btn-primary" id="btn-to-story">Tiếp →</button>
       </div>
     `;
@@ -728,51 +866,79 @@ const UI = {
   renderUpgrade(state, handlers) {
     this.clear();
     this.root.classList.add("screen-upgrade");
-    const disc = state.upgrades.restock_discount ? 0.2 : 0;
+    const fx = getEffects(state.upgrades);
+    const disc = fx.stockDiscount || 0;
 
-    const upRows = UPGRADES.map((u) => {
-      const owned = !!state.upgrades[u.id];
+    const upRows = DEVICES.map((d) => {
+      const lv = state.upgrades[d.id] | 0;
+      const maxed = lv >= d.maxLevel;
+      const cost = deviceUpgradeCost(d, lv);
+      const canBuy = !maxed && state.money >= cost;
+      const levelPips =
+        "●".repeat(lv) + "○".repeat(Math.max(0, d.maxLevel - lv));
       return `<div class="upgrade-row">
         <div>
-          <div>${u.emoji} <b>${u.name}</b> ${owned ? "✅" : "· " + this.money(u.cost)}</div>
-          <div class="muted small">${u.desc}</div>
+          <div>${d.emoji} <b>${d.name}</b>
+            <span class="level-pill">Cấp ${lv}/4</span>
+            <span class="level-pips" title="Cấp ${lv}/4">${levelPips}</span>
+          </div>
+          <div class="muted small">${d.blurb}</div>
+          <div class="muted small effect-line">${d.effectLine(lv)}${
+        !maxed ? ` → ${d.effectLine(lv + 1)}` : " · Tối đa"
+      }</div>
         </div>
-        <button class="btn btn-sm ${owned ? "btn-ghost" : "btn-secondary"}" data-up="${u.id}" ${owned || state.money < u.cost ? "disabled" : ""}>
-          ${owned ? "Đã có" : "Mua"}
+        <button class="btn btn-sm ${maxed ? "btn-ghost" : "btn-secondary"}" data-up="${d.id}" ${
+        maxed || !canBuy ? "disabled" : ""
+      }>
+          ${maxed ? "Max" : "Nâng · " + this.money(cost)}
         </button>
       </div>`;
     }).join("");
 
-    const stockRows = Object.values(INGREDIENTS)
-      .map((ing) => {
-        const price = Math.round(ing.cost * (1 - disc));
-        const qty = state.inventory[ing.id] || 0;
-        return `<div class="stock-row">
-          <span>${ing.emoji} ${ing.name} <span class="muted">(còn ${qty})</span></span>
-          <span class="stock-buy">
-            <button class="btn btn-sm btn-ghost" data-buy="${ing.id}" data-qty="1">+1 · ${this.money(price)}</button>
-            <button class="btn btn-sm btn-secondary" data-buy="${ing.id}" data-qty="5">+5 · ${this.money(price * 5)}</button>
-          </span>
-        </div>`;
-      })
-      .join("");
+    const stockSection = (cat, title) =>
+      Object.values(INGREDIENTS)
+        .filter((ing) => ing.cat === cat)
+        .map((ing) => {
+          const price = Math.round(ing.cost * (1 - disc));
+          const qty = state.inventory[ing.id] || 0;
+          const bonus =
+            fx.stockBonusQty && qty >= 0
+              ? ` <span class="muted small">(+${fx.stockBonusQty} khi mua +5)</span>`
+              : "";
+          return `<div class="stock-row">
+            <span>${ing.emoji} ${ing.name} <span class="muted">(còn ${qty})</span>${bonus}</span>
+            <span class="stock-buy">
+              <button class="btn btn-sm btn-ghost" data-buy="${ing.id}" data-qty="1">+1 · ${this.money(price)}</button>
+              <button class="btn btn-sm btn-secondary" data-buy="${ing.id}" data-qty="5">+5 · ${this.money(price * 5)}</button>
+            </span>
+          </div>`;
+        })
+        .join("");
+
+    const nextLabel =
+      state.day >= GAME_CONFIG.totalDays
+        ? "Xem kết thúc →"
+        : `Sang Ngày ${state.day + 1} →`;
 
     this.root.innerHTML = `
       <div class="upgrade-layout">
         <div class="card">
-          <h2>⬆️ Nâng cấp</h2>
-          <p class="muted">Tiền: <b>${this.money(state.money)}</b>${disc ? " · Giảm giá kho 20%" : ""}</p>
+          <h2>⬆️ Thiết bị (Cấp 0→4)</h2>
+          <p class="muted">Tiền: <b>${this.money(state.money)}</b>${
+      disc ? ` · Giảm giá kho ${Math.round(disc * 100)}%` : ""
+    }</p>
           <div class="upgrade-list">${upRows}</div>
         </div>
         <div class="card">
           <h2>🛒 Nhập hàng</h2>
-          <div class="stock-list">${stockRows}</div>
+          <h3 class="menu-sec">Nguyên liệu trà</h3>
+          <div class="stock-list">${stockSection("drink")}</div>
+          <h3 class="menu-sec">Nguyên liệu ăn nhẹ</h3>
+          <div class="stock-list">${stockSection("snack")}</div>
         </div>
       </div>
       <div class="center pad">
-        <button class="btn btn-primary btn-lg" id="btn-next-day">
-          ${state.day >= 3 ? "Xem kết thúc →" : `Sang Ngày ${state.day + 1} →`}
-        </button>
+        <button class="btn btn-primary btn-lg" id="btn-next-day">${nextLabel}</button>
       </div>
     `;
 
@@ -786,33 +952,51 @@ const UI = {
     document.getElementById("btn-next-day").onclick = handlers.nextDay;
   },
 
-  /* ---------- WIN ---------- */
+  /* ---------- WIN / ENDING ---------- */
   renderWin(state, onTitle) {
     this.clear();
     this.root.classList.add("screen-win");
+    const lt = state.lifetime || { starSum: 0, starCount: 0, totalRevenue: 0, served: 0 };
+    const avg =
+      lt.starCount > 0 ? (lt.starSum / lt.starCount).toFixed(2) : "—";
+    let ownedLevels = 0;
+    let maxLevels = 0;
+    const deviceLines = DEVICES.map((d) => {
+      const lv = state.upgrades[d.id] | 0;
+      ownedLevels += lv;
+      maxLevels += d.maxLevel;
+      return `<li>${d.emoji} ${d.name}: <b>Cấp ${lv}/4</b></li>`;
+    }).join("");
+
     this.root.innerHTML = `
       <div class="card win-card">
-        <div class="title-emoji">🎉🧋</div>
-        <h1>Ba ngày đầu thành công!</h1>
-        <p><b>${state.shopName}</b> đã đứng vững trong khu phố.</p>
+        <div class="title-emoji">🎉🧋🍪</div>
+        <h1>30 ngày thành công!</h1>
+        <p><b>${state.shopName}</b> đã đứng vững một tháng trong khu phố.</p>
         <ul class="summary-list">
           <li>Tiền cuối: <b>${this.money(state.money)}</b></li>
+          <li>Doanh thu cả tháng (ước): <b>${this.money(lt.totalRevenue || 0)}</b></li>
           <li>Uy tín: <b>${this.stars(state.rep)}</b></li>
-          <li>Nâng cấp: <b>${Object.keys(state.upgrades).filter((k) => state.upgrades[k]).length}/${UPGRADES.length}</b></li>
+          <li>Đánh giá TB: <b>${avg}/5</b> (${lt.starCount || 0} lượt)</li>
+          <li>Khách phục vụ: <b>${lt.served || 0}</b></li>
+          <li>Nâng cấp thiết bị: <b>${ownedLevels}/${maxLevels}</b> cấp</li>
         </ul>
-        <p class="flavor">MVP đến đây — cảm ơn bạn đã chơi!</p>
-        <button class="btn btn-primary" id="btn-title">Về màn hình chính</button>
+        <details class="device-details">
+          <summary>Chi tiết thiết bị</summary>
+          <ul class="summary-list compact">${deviceLines}</ul>
+        </details>
+        <p class="flavor">Cảm ơn bạn đã chơi Trà Nhà Mình!</p>
+        <button class="btn btn-primary" id="btn-title">Ván mới / Màn hình chính</button>
       </div>
     `;
     document.getElementById("btn-title").onclick = onTitle;
   },
 
-  /* ---------- SERVE RESULT FLASH ---------- */
   renderServeResult(result, onDone) {
     const map = {
       perfect: { title: "Hoàn hảo! ✨", cls: "good", msg: "Khách cười toe toét." },
       ok: { title: "Gần đúng 🙂", cls: "ok", msg: "Khách chấp nhận, ít tip hơn." },
-      wrong: { title: "Sai công thức 😅", cls: "bad", msg: "Phải hoàn / mất uy tín." },
+      wrong: { title: "Sai món 😅", cls: "bad", msg: "Phải hoàn / mất uy tín." },
       left: { title: "Khách bỏ đi...", cls: "bad", msg: "Hết kiên nhẫn." },
     };
     const m = map[result.quality] || map.ok;
@@ -821,8 +1005,7 @@ const UI = {
       result.starDisplay ||
       (stars ? "★".repeat(stars) + "☆".repeat(Math.max(0, 5 - stars)) : "");
     const repDelta = result.repDelta != null ? result.repDelta : 0;
-    const repTxt =
-      (repDelta >= 0 ? "+" : "") + repDelta.toFixed(2) + " uy tín";
+    const repTxt = (repDelta >= 0 ? "+" : "") + repDelta.toFixed(2) + " uy tín";
     this.modal(`
       <h2 class="${m.cls}">${m.title}</h2>
       <p>${m.msg}</p>
