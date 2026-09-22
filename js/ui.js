@@ -627,34 +627,40 @@ const UI = {
           !(state.departing || []).length &&
           !state.currentCustomer &&
           !(state.readyTray || []).length &&
-          state.customersLeft <= 0 &&
-          !(state.tables || []).some((t) => t.status === "occupied" || t.status === "cleaning");
+          state.customersLeft <= 0;
+    // Note: dirty/cleaning tables must not block canEnd (fallback ignores them)
 
     const stuck =
       typeof handlers.hasStuck === "function"
         ? handlers.hasStuck()
-        : state.customersLeft <= 0 &&
-          active > 0 &&
-          (state.queue || []).some((c) =>
-            ["waiting_food", "waiting_brew", "waiting_pickup", "eating", "waiting_table", "serving"].includes(
-              c.phase
-            )
-          );
+        : state.customersLeft <= 0 && !canEnd;
 
     if (canEnd) {
       meta.innerHTML = `<p class="muted center">Hết khách hôm nay.</p>
         <button class="btn btn-primary" id="btn-end-day">Kết thúc ngày →</button>`;
       const endBtn = document.getElementById("btn-end-day");
       if (endBtn && handlers.endDay) endBtn.onclick = handlers.endDay;
-    } else if (stuck && state.customersLeft <= 0) {
+    } else if (state.customersLeft <= 0) {
+      // Always offer unstick + force end after spawn — never hide both (day-5 cleaner lock)
       const stuckCust =
         (state.queue || []).find((c) =>
-          ["waiting_food", "waiting_brew", "waiting_pickup", "eating", "waiting_table", "serving"].includes(
-            c.phase
-          )
+          [
+            "waiting_food",
+            "waiting_brew",
+            "waiting_pickup",
+            "eating",
+            "waiting_table",
+            "serving",
+            "seated_ready",
+            "waiting",
+            "walking_in",
+          ].includes(c.phase)
         ) || state.currentCustomer;
+      const hint = stuck
+        ? "Sàn còn việc / khách treo — Đổi bàn, Bưng món, Dọn, hoặc xử lý."
+        : "Sàn chưa trống — có thể kết thúc ngày (dọn bàn bẩn tự động).";
       meta.innerHTML = `
-        <p class="muted center">Có khách đang treo — hãy Đổi bàn / Bưng món, hoặc xử lý.</p>
+        <p class="muted center">${hint}</p>
         <div class="row-actions center-actions">
           ${
             stuckCust

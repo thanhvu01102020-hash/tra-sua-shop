@@ -1019,7 +1019,12 @@ const Game = {
     }
     this.state.queue = this.state.queue.filter((x) => x.id !== customer.id);
     try {
-      this.applyPaymentAndRate(customer, result, "dinein");
+      // Avoid stacking modals during bulk settle / last-customer recovery
+      if (UI.hasModal() || this.state.customersLeft <= 0) {
+        this.settlePaymentQuiet(customer, result, "dinein");
+      } else {
+        this.applyPaymentAndRate(customer, result, "dinein");
+      }
     } catch (err) {
       // Ensure customer leaves even if payment UI fails
       this.markTableDirty(customer);
@@ -1027,6 +1032,42 @@ const Game = {
       UI.toast("Khách dùng xong (khôi phục treo)", "info");
     }
     return true;
+  },
+
+  /** Pay + depart without serve-result modal (sim / unstick / end-day safe). */
+  settlePaymentQuiet(customer, result, mode) {
+    const order = customer.order;
+    const price = this.orderPrice(order);
+    let pay = 0;
+    let tip = 0;
+    const quality = result.quality;
+    const fx = this.effects();
+    const stars = this.calcStars(result, customer);
+    if (quality === "perfect") {
+      pay = price;
+      if (result.fast) tip = Math.round(price * GAME_CONFIG.tipRate * 0.5);
+      this.dayStats.perfect++;
+    } else if (quality === "ok") {
+      pay = Math.round(price * 0.7);
+    } else if (this.dayStats) {
+      this.dayStats.wrong++;
+    }
+    if (order.type === "snack") this.dayStats.snacks++;
+    if (order.type === "combo") this.dayStats.combos++;
+    this.applyStarRep(stars);
+    this.recordStars(stars);
+    if (quality !== "wrong") {
+      this.dayStats.served++;
+      if (this.state.lifetime) this.state.lifetime.served++;
+      // dineIn/takeaway already counted at spawn
+    }
+    this.state.money += pay + tip;
+    this.state.dayRevenue += pay + tip;
+    this.dayStats.tips += tip;
+    this.dayStats.revenue += pay + tip;
+    if (this.state.lifetime) this.state.lifetime.totalRevenue += pay + tip;
+    if (mode === "dinein") this.markTableDirty(customer);
+    this.beginDepart(customer, quality === "wrong" ? "angry" : "served");
   },
 
   /**
@@ -1163,21 +1204,25 @@ const Game = {
     });
     this.staffBrewJobs = jobs;
 
-    // Force-finish overlong eating (fail-safe if normal tick missed)
-    if (!UI.hasModal()) {
-      const eatMax = (GAME_CONFIG.eatDuration || 4.5) * 1.35;
-      (this.state.queue || [])
-        .filter((c) => c.phase === "eating")
-        .forEach((c) => {
-          if (c.eatT == null) c.eatT = 0;
-          if (
-            c.eatT >= eatMax ||
-            (c.eatT >= (GAME_CONFIG.eatDuration || 4.5) && !c.pendingResult)
-          ) {
-            this.forceFinishEating(c);
-            changed = true;
-          }
-        });
+    // Force-finish overlong eating (fail-safe if normal tick missed).
+    // When spawn is done, do not let a serve-result modal soft-lock eaters.
+    {
+      const allowForceEat = !UI.hasModal() || this.state.customersLeft <= 0;
+      if (allowForceEat) {
+        const eatMax = (GAME_CONFIG.eatDuration || 4.5) * 1.35;
+        (this.state.queue || [])
+          .filter((c) => c.phase === "eating")
+          .forEach((c) => {
+            if (c.eatT == null) c.eatT = 0;
+            if (
+              c.eatT >= eatMax ||
+              (c.eatT >= (GAME_CONFIG.eatDuration || 4.5) && !c.pendingResult)
+            ) {
+              this.forceFinishEating(c);
+              changed = true;
+            }
+          });
+      }
     }
 
     // Long waiting_food with tray → auto force-serve; without tray → leave
@@ -1221,9 +1266,8 @@ const Game = {
     return changed;
   },
 
-  isDayFloorClear() {
-    if (!this.state) return false;
-    const activePhases = new Set([
+  activeCustomerPhases() {
+    return new Set([
       "waiting",
       "waiting_table",
       "seated_ready",
@@ -1234,28 +1278,98 @@ const Game = {
       "serving",
       "walking_in",
     ]);
-    const active = (this.state.queue || []).filter((c) => activePhases.has(c.phase)).length;
-    if (active > 0) return false;
+  },
+
+  countActiveCustomers() {
+    if (!this.state) return 0;
+    const phases = this.activeCustomerPhases();
+    return (this.state.queue || []).filter((c) => phases.has(c.phase)).length;
+  },
+
+  /**
+   * Floor is clear for ending once spawn is done and no living service work remains.
+   * Dirty / cleaning tables must NEVER block (day-5 cleaner soft-lock).
+   * Ghost occupied tables without a living customer are ignored.
+   */
+  isDayFloorClear() {
+    if (!this.state) return false;
+    if (this.state.customersLeft > 0) return false;
+    if (this.countActiveCustomers() > 0) return false;
     if ((this.state.departing || []).length > 0) return false;
     if (this.state.currentCustomer) return false;
     if ((this.state.readyTray || []).length > 0) return false;
-    if (this.state.customersLeft > 0) return false;
     if ((this.staffBrewJobs || []).length > 0) return false;
-    if ((this.state.tables || []).some((t) => t.status === "occupied" || t.status === "cleaning")) {
+    // Only a table still owned by a living customer blocks (ghost occupied is ok)
+    const living = new Set((this.state.queue || []).map((c) => c.id));
+    if (this.state.currentCustomer) living.add(this.state.currentCustomer.id);
+    if (
+      (this.state.tables || []).some(
+        (t) => t.status === "occupied" && t.customerId && living.has(t.customerId)
+      )
+    ) {
       return false;
     }
     return true;
   },
 
+  /**
+   * After spawn is done, ANY residual that blocks clear counts as "stuck"
+   * so UI always offers Bỏ qua / Kết thúc ngày (force) — including cleaning-only
+   * floors after day-5 tạp vụ starts auto-clean.
+   */
   hasStuckLastCustomers() {
     if (!this.state || this.state.customersLeft > 0) return false;
-    if (this.state.currentCustomer) return true;
-    if ((this.staffBrewJobs || []).length > 0) return true;
-    return (this.state.queue || []).some((c) =>
-      ["waiting_food", "waiting_brew", "waiting_pickup", "eating", "serving", "waiting_table"].includes(
-        c.phase
-      )
-    );
+    if (this.isDayFloorClear()) return false;
+    return true;
+  },
+
+  /** Snap-finish dirty/cleaning when no guests remain so end-day unlocks. */
+  settleIdleHousekeeping() {
+    if (!this.state || this.state.customersLeft > 0) return false;
+    if (this.countActiveCustomers() > 0 || this.state.currentCustomer) return false;
+    let changed = false;
+    if (this.cleanJob) {
+      const id = this.cleanJob.tableId;
+      this.cleanJob = null;
+      const t = (this.state.tables || []).find((x) => x.id === id);
+      if (t) {
+        t.status = "empty";
+        t.customerId = null;
+        t.cleanT = 0;
+        if (this.dayStats) this.dayStats.cleaned++;
+      }
+      changed = true;
+    }
+    (this.state.tables || []).forEach((t) => {
+      if (t.status === "dirty" || t.status === "cleaning") {
+        t.status = "empty";
+        t.customerId = null;
+        t.cleanT = 0;
+        changed = true;
+      } else if (t.status === "occupied") {
+        const c = t.customerId ? this.findCustomerById(t.customerId) : null;
+        if (!c) {
+          t.status = "empty";
+          t.customerId = null;
+          t.cleanT = 0;
+          changed = true;
+        }
+      }
+    });
+    if ((this.state.readyTray || []).length && this.countActiveCustomers() === 0 && !this.state.currentCustomer) {
+      this.state.readyTray = [];
+      changed = true;
+    }
+    if ((this.staffBrewJobs || []).length && this.countActiveCustomers() === 0 && !this.state.currentCustomer) {
+      this.staffBrewJobs = [];
+      changed = true;
+    }
+    // Snap departing walk-outs once shop floor is otherwise idle
+    if ((this.state.departing || []).length > 0 && this.countActiveCustomers() === 0 && !this.state.currentCustomer) {
+      this.state.departing = [];
+      changed = true;
+    }
+    return changed;
   },
 
   beginDepart(customer, reason) {
@@ -1931,7 +2045,7 @@ const Game = {
     });
     this.state.departing = [];
     (this.state.tables || []).forEach((t) => {
-      if (t.status === "occupied" || t.status === "cleaning") {
+      if (t.status === "occupied" || t.status === "cleaning" || t.status === "dirty") {
         t.status = "empty";
         t.customerId = null;
         t.cleanT = 0;
@@ -1941,11 +2055,24 @@ const Game = {
   },
 
   endDay() {
+    // Never soft-lock: settle leftovers (dirty/cleaning/orphans) before summary
+    if (!this.isDayFloorClear()) {
+      this.forceClearFloorForEnd();
+    } else {
+      this.settleIdleHousekeeping();
+    }
     this.state.shopOpen = false;
     this.stateName = "DAY_END";
     this.state.flags._tipBoostDay = false;
     this.cleanJob = null;
 
+    if (!this.dayStats) {
+      this.dayStats = {
+        served: 0, perfect: 0, wrong: 0, left: 0, tips: 0, revenue: 0,
+        repStart: this.state.rep, starSum: 0, starCount: 0, snacks: 0, combos: 0,
+        dineIn: 0, takeaway: 0, cleaned: 0, wages: 0,
+      };
+    }
     const goal = dayGoal(this.state.day);
     const repDelta = this.state.rep - this.dayStats.repStart;
     if (this.state.dayRevenue >= goal) {
@@ -2196,6 +2323,23 @@ const Game = {
     let needQueueRefresh = false;
 
     if (this.syncFloorIntegrity(false)) needFullRender = true;
+    if (this.settleIdleHousekeeping()) needFullRender = true;
+
+    // Hang watchdog: if spawn done but floor never clears, nudge + allow force end
+    if (this.state.customersLeft <= 0 && !this.isDayFloorClear()) {
+      this._hangToastAt = (this._hangToastAt || 0) + dt;
+      if (this._hangToastAt > 14) {
+        this._hangToastAt = 0;
+        this.syncFloorIntegrity(true);
+        this.settleIdleHousekeeping();
+        needFullRender = true;
+        if (!UI.hasModal()) {
+          UI.toast("Sàn quán treo — dùng Bỏ qua khách / Kết thúc ngày", "info");
+        }
+      }
+    } else {
+      this._hangToastAt = 0;
+    }
 
     // Progress barista jobs even if staff panel toggled off / count changed
     if (this.staffBrewJobs && this.staffBrewJobs.length) {

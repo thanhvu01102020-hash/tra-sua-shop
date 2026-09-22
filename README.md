@@ -58,6 +58,7 @@ tra-sua-shop/
   js/story.js
   js/ui.js
   js/game.js
+  scripts/sim-30.mjs — headless playtest ngày 1→30
 ```
 
 ## Giới hạn
@@ -66,6 +67,7 @@ tra-sua-shop/
 - Combo prep nối tiếp (trà rồi snack).
 - Staff AI theo timer (nhiều NV cùng role = nhanh hơn / song song); barista tự pha.
 - **Đổi bàn** cho khách tại chỗ (ghế trống sạch) để gỡ kẹt bàn.
-- Fail-safe hết ngày: đồng bộ bàn/khay, auto-bưng/ăn xong, nút xử lý treo nếu cần.
+- Fail-safe hết ngày: bàn bẩn/đang dọn **không** chặn Kết thúc ngày; đồng bộ bàn/khay; auto-bưng/ăn xong; **Bỏ qua khách / Xử lý treo** + force end khi spawn xong.
+- Playtest: `node scripts/sim-30.mjs`
 - Chưa pathfinding; quản lý chỉ có ưu tiên pha/dọn nhẹ.
 - Mobile chơi được; tối ưu quanh ≥900px.
