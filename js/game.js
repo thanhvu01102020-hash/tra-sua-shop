@@ -18,6 +18,9 @@ const Game = {
   cleanJob: null, // { tableId, t, dur, by: 'player'|'staff' }
   moveTableCustId: null, // when set, player is picking a target table for Đổi bàn
   _hangToastAt: 0,
+  _modalStuckAt: 0,
+  _forceClearToastShown: false,
+  _departingAge: {}, // id -> age seconds for snap-clear
 
   boot() {
     UI.init();
@@ -504,6 +507,10 @@ const Game = {
     this.state.tables = this.buildTables();
     this.cleanJob = null;
     this.moveTableCustId = null;
+    this._hangToastAt = 0;
+    this._modalStuckAt = 0;
+    this._forceClearToastShown = false;
+    this._departingAge = {};
     this.staffTimers = { take: 1.5, serve: 2, clean: 2.5, brew: 0.8 };
     this.staffBrewJobs = [];
 
@@ -559,6 +566,7 @@ const Game = {
       cancelMoveTable: () => this.cancelMoveTable(),
       unstickCustomer: (custId) => this.unstickCustomer(custId),
       forceEndDay: () => {
+        UI.closeModal();
         this.forceClearFloorForEnd();
         this.endDay();
       },
@@ -872,22 +880,71 @@ const Game = {
     ].includes(customer.phase);
   },
 
+  /** Instant-clean a dirty/cleaning table so Đổi bàn can proceed. */
+  forceEmptyTable(tableId, opts) {
+    const skipCust = opts && opts.skipCustomerId;
+    const t = (this.state.tables || []).find((x) => x.id === tableId);
+    if (!t) return false;
+    if (skipCust && t.customerId === skipCust) return false;
+    if (t.status === "occupied" && t.customerId) {
+      const living = this.findCustomerById(t.customerId);
+      if (living && living.id !== skipCust) return false; // don't steal occupied with guest
+    }
+    if (this.cleanJob && this.cleanJob.tableId === t.id) this.cleanJob = null;
+    t.status = "empty";
+    t.customerId = null;
+    t.cleanT = 0;
+    return true;
+  },
+
   beginMoveTable(custId) {
     const c = this.findCustomerById(custId);
     if (!c || !this.canMoveTable(c)) {
       UI.toast("Không thể đổi bàn khách này", "bad");
       return;
     }
-    const empties = (this.state.tables || []).filter((t) => t.status === "empty");
+    let empties = (this.state.tables || []).filter(
+      (t) => t.status === "empty" && t.id !== c.tableId
+    );
+    // If no empty: auto-instant-clean one dirty/cleaning (not customer's current)
     if (!empties.length) {
-      UI.toast("Không còn bàn trống sạch", "bad");
+      const dirty = (this.state.tables || []).find(
+        (t) =>
+          (t.status === "dirty" || t.status === "cleaning") &&
+          t.id !== c.tableId
+      );
+      if (dirty && this.forceEmptyTable(dirty.id, { skipCustomerId: c.id })) {
+        UI.toast("Đã dọn nhanh " + dirty.id.replace("t", "B") + " để đổi bàn", "info");
+        empties = [dirty];
+      }
+    }
+    // Still none: allow picking ANY other table (force empty on pick)
+    const others = (this.state.tables || []).filter((t) => t.id !== c.tableId);
+    if (!empties.length && !others.length) {
+      UI.toast("Không còn bàn khác để đổi", "bad");
       this.sfxBad();
       return;
     }
     this.sfxClick();
     this.moveTableCustId = c.id;
+    const targets = empties.length
+      ? empties
+      : others; // modal will label dirty as Dọn & chuyển
+    if (targets.length === 1) {
+      // Auto-move to sole target
+      const only = targets[0];
+      if (only.status !== "empty") {
+        this.forceEmptyTable(only.id, { skipCustomerId: c.id });
+      }
+      this.completeMoveTable(only.id);
+      return;
+    }
     UI.renderMoveTableModal(this.state, c, {
       pick: (tableId) => this.completeMoveTable(tableId),
+      pickDirty: (tableId) => {
+        this.forceEmptyTable(tableId, { skipCustomerId: c.id });
+        this.completeMoveTable(tableId);
+      },
       cancel: () => this.cancelMoveTable(),
     });
   },
@@ -909,11 +966,22 @@ const Game = {
       return;
     }
     const target = (this.state.tables || []).find((t) => t.id === targetTableId);
-    if (!target || target.status !== "empty") {
-      UI.toast("Bàn đích không trống sạch", "bad");
+    if (!target || target.id === customer.tableId) {
+      UI.toast("Bàn đích không hợp lệ", "bad");
       this.sfxBad();
       this.renderShop();
       return;
+    }
+    // Force-empty target if dirty/cleaning/ghost (Đổi bàn must never soft-fail)
+    if (target.status !== "empty") {
+      const other = target.customerId ? this.findCustomerById(target.customerId) : null;
+      if (other && other.id !== customer.id && this.canMoveTable(other)) {
+        UI.toast("Bàn đích đang có khách", "bad");
+        this.sfxBad();
+        this.renderShop();
+        return;
+      }
+      this.forceEmptyTable(target.id, { skipCustomerId: customer.id });
     }
     const oldId = customer.tableId;
     const old = oldId
@@ -934,6 +1002,14 @@ const Game = {
         old.cleanT = 0;
       }
     }
+
+    // Clear any other table still pointing at this customer (no ghost occupied)
+    (this.state.tables || []).forEach((t) => {
+      if (t.id !== target.id && t.customerId === customer.id) {
+        t.customerId = null;
+        if (t.status === "occupied") t.status = "empty";
+      }
+    });
 
     target.status = "occupied";
     target.customerId = customer.id;
@@ -1017,10 +1093,15 @@ const Game = {
     if (!result) {
       result = { quality: "ok", elapsed: 0, fast: true, softLimit: GAME_CONFIG.brewTimeLimit };
     }
+    // Quiet when spawn done OR this is the last/only active customer
+    const activeBefore = this.countActiveCustomers();
+    const quiet =
+      UI.hasModal() ||
+      this.state.customersLeft <= 0 ||
+      activeBefore <= 1;
     this.state.queue = this.state.queue.filter((x) => x.id !== customer.id);
     try {
-      // Avoid stacking modals during bulk settle / last-customer recovery
-      if (UI.hasModal() || this.state.customersLeft <= 0) {
+      if (quiet) {
         this.settlePaymentQuiet(customer, result, "dinein");
       } else {
         this.applyPaymentAndRate(customer, result, "dinein");
@@ -1295,7 +1376,7 @@ const Game = {
     if (!this.state) return false;
     if (this.state.customersLeft > 0) return false;
     if (this.countActiveCustomers() > 0) return false;
-    if ((this.state.departing || []).length > 0) return false;
+    // departing is cosmetic walk-out — never block end-day / escape UI
     if (this.state.currentCustomer) return false;
     if ((this.state.readyTray || []).length > 0) return false;
     if ((this.staffBrewJobs || []).length > 0) return false;
@@ -1787,6 +1868,12 @@ const Game = {
 
     this.beginDepart(customer, quality === "wrong" ? "angry" : "served");
     this.renderShop();
+    // Skip serve-result modal when day is ending / last active customer
+    if (this.state.customersLeft <= 0 || this.countActiveCustomers() <= 0) {
+      this.save();
+      this.refreshEndDayUi();
+      return;
+    }
     UI.renderServeResult(
       {
         quality,
@@ -2055,11 +2142,14 @@ const Game = {
   },
 
   endDay() {
-    // Never soft-lock: settle leftovers (dirty/cleaning/orphans) before summary
+    // Never soft-lock / never no-op: close modal, clear floor, then summary
+    UI.closeModal();
+    this.moveTableCustId = null;
     if (!this.isDayFloorClear()) {
       this.forceClearFloorForEnd();
     } else {
       this.settleIdleHousekeeping();
+      this.state.departing = [];
     }
     this.state.shopOpen = false;
     this.stateName = "DAY_END";
@@ -2304,6 +2394,75 @@ const Game = {
   /* ---------- LOOP ---------- */
   stopShopLoop() {},
 
+  /** End-day / escape controls — always refresh even if a modal is open. */
+  refreshEndDayUi() {
+    if (!this.state || this.stateName !== "SHOP") return;
+    const handlers = {
+      endDay: () => this.endDay(),
+      forceEndDay: () => {
+        UI.closeModal();
+        this.forceClearFloorForEnd();
+        this.endDay();
+      },
+      unstickCustomer: (id) => this.unstickCustomer(id),
+      moveTable: (id) => this.beginMoveTable(id),
+      canEndDay: () => this.isDayFloorClear(),
+      hasStuck: () => this.hasStuckLastCustomers(),
+    };
+    try {
+      UI.refreshQueuePanelMeta(this.state, handlers);
+    } catch (_) {}
+    try {
+      if (typeof UI.renderDayEscapeBar === "function") {
+        UI.renderDayEscapeBar(this.state, handlers);
+      }
+    } catch (_) {}
+  },
+
+  /** Snap departing walk-outs when idle or any walker >2s. */
+  snapClearDeparting(dt) {
+    if (!this.state) return false;
+    const list = this.state.departing || [];
+    if (!list.length) {
+      this._departingAge = {};
+      return false;
+    }
+    const ages = this._departingAge || {};
+    let changed = false;
+    const keep = [];
+    list.forEach((c) => {
+      ages[c.id] = (ages[c.id] || 0) + (dt || 0);
+      if (ages[c.id] > 2) {
+        changed = true;
+        return; // drop
+      }
+      keep.push(c);
+    });
+    // Also snap all if no active work remains
+    const idle =
+      this.countActiveCustomers() === 0 &&
+      !this.state.currentCustomer &&
+      !(this.state.readyTray || []).length &&
+      !(this.staffBrewJobs || []).length;
+    if (idle && keep.length) {
+      this.state.departing = [];
+      this._departingAge = {};
+      return true;
+    }
+    this._departingAge = ages;
+    if (keep.length !== list.length) {
+      this.state.departing = keep;
+      // prune ages
+      const next = {};
+      keep.forEach((c) => {
+        if (ages[c.id] != null) next[c.id] = ages[c.id];
+      });
+      this._departingAge = next;
+      return true;
+    }
+    return changed;
+  },
+
   loop(ts) {
     const dt = this.lastTs ? Math.min(0.1, (ts - this.lastTs) / 1000) : 0.016;
     this.lastTs = ts;
@@ -2323,22 +2482,49 @@ const Game = {
     let needQueueRefresh = false;
 
     if (this.syncFloorIntegrity(false)) needFullRender = true;
-    if (this.settleIdleHousekeeping()) needFullRender = true;
 
-    // Hang watchdog: if spawn done but floor never clears, nudge + allow force end
-    if (this.state.customersLeft <= 0 && !this.isDayFloorClear()) {
-      this._hangToastAt = (this._hangToastAt || 0) + dt;
-      if (this._hangToastAt > 14) {
-        this._hangToastAt = 0;
-        this.syncFloorIntegrity(true);
-        this.settleIdleHousekeeping();
-        needFullRender = true;
-        if (!UI.hasModal()) {
-          UI.toast("Sàn quán treo — dùng Bỏ qua khách / Kết thúc ngày", "info");
+    // Every tick when spawn done: housekeeping, snap departing, modal escape, end-day UI
+    if (this.state.customersLeft <= 0) {
+      if (this.settleIdleHousekeeping()) needFullRender = true;
+      if (this.snapClearDeparting(dt)) needFullRender = true;
+
+      const floorClear = this.isDayFloorClear();
+      const stuck = this.hasStuckLastCustomers();
+      if (UI.hasModal() && (floorClear || stuck)) {
+        this._modalStuckAt = (this._modalStuckAt || 0) + dt;
+        if (this._modalStuckAt > 1.5) {
+          UI.closeModal();
+          this.moveTableCustId = null;
+          this._modalStuckAt = 0;
+          needFullRender = true;
         }
+      } else {
+        this._modalStuckAt = 0;
       }
+
+      // Watchdog: not clear >8s → auto force-clear once + toast
+      if (!floorClear) {
+        this._hangToastAt = (this._hangToastAt || 0) + dt;
+        if (this._hangToastAt > 8) {
+          if (!this._forceClearToastShown) {
+            this._forceClearToastShown = true;
+            this.forceClearFloorForEnd();
+            UI.toast("Tự gỡ treo sàn — có thể kết thúc ngày", "info");
+            needFullRender = true;
+          }
+        }
+      } else {
+        this._hangToastAt = 0;
+        this._forceClearToastShown = false;
+      }
+
+      // ALWAYS refresh end-day / escape UI even with modal open
+      this.refreshEndDayUi();
     } else {
       this._hangToastAt = 0;
+      this._modalStuckAt = 0;
+      this._forceClearToastShown = false;
+      if (this.settleIdleHousekeeping()) needFullRender = true;
     }
 
     // Progress barista jobs even if staff panel toggled off / count changed
@@ -2540,10 +2726,28 @@ const Game = {
         });
         UI.refreshQueuePanelMeta(this.state, {
           endDay: () => this.endDay(),
+          forceEndDay: () => {
+            UI.closeModal();
+            this.forceClearFloorForEnd();
+            this.endDay();
+          },
           unstickCustomer: (id) => this.unstickCustomer(id),
+          moveTable: (id) => this.beginMoveTable(id),
           canEndDay: () => this.isDayFloorClear(),
           hasStuck: () => this.hasStuckLastCustomers(),
         });
+        if (typeof UI.renderDayEscapeBar === "function") {
+          UI.renderDayEscapeBar(this.state, {
+            endDay: () => this.endDay(),
+            forceEndDay: () => {
+              UI.closeModal();
+              this.forceClearFloorForEnd();
+              this.endDay();
+            },
+            unstickCustomer: (id) => this.unstickCustomer(id),
+            moveTable: (id) => this.beginMoveTable(id),
+          });
+        }
         UI.renderReadyTray(this.state, {
           serveReady: (id) => this.serveReady(id),
         });
@@ -2556,6 +2760,8 @@ const Game = {
         });
       } else {
         UI.syncPatienceBars(this.state);
+        // Even when modal blocks queue refresh, keep escape bar alive
+        if (this.state.customersLeft <= 0) this.refreshEndDayUi();
       }
       if (needFullRender) this.save();
     }

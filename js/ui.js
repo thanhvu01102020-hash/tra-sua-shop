@@ -6,11 +6,23 @@ const UI = {
 
   init() {
     this.root = document.getElementById("app");
+    if (!this._escapeBound) {
+      this._escapeBound = true;
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && this.hasModal()) {
+          e.preventDefault();
+          this.closeModal();
+        }
+      });
+    }
   },
 
   clear() {
     this.root.innerHTML = "";
     this.root.className = "app";
+    const bar = document.getElementById("day-escape-bar");
+    if (bar) bar.remove();
+    this.closeModal();
   },
 
   money(n) {
@@ -243,6 +255,7 @@ const UI = {
       canEndDay: () => Game.isDayFloorClear(),
       hasStuck: () => Game.hasStuckLastCustomers(),
     });
+    this.renderDayEscapeBar(state, handlers);
     this.renderCounter(state, handlers);
     this.renderReadyTray(state, handlers);
     this.renderOrder(state);
@@ -419,7 +432,11 @@ const UI = {
     const take = document.getElementById("fa-take");
     if (take) take.onclick = () => handlers.takeOrder(seated[0].id);
     const move = document.getElementById("fa-move");
-    if (move) move.onclick = () => handlers.moveTable(movable[0].id);
+    if (move)
+      move.onclick = (ev) => {
+        if (ev && ev.stopPropagation) ev.stopPropagation();
+        handlers.moveTable(movable[0].id);
+      };
     const serve = document.getElementById("fa-serve");
     if (serve) serve.onclick = () => handlers.serveReady(readyDi[0].id);
     const bag = document.getElementById("fa-bag");
@@ -685,6 +702,83 @@ const UI = {
     } else {
       meta.innerHTML = "";
     }
+    // Escape bar stays clickable even under modals
+    this.renderDayEscapeBar(state, handlers);
+  },
+
+  /**
+   * Fixed emergency bar when spawn is done — always above modals (z-index 200).
+   * Kết thúc ngày / Gỡ treo / Đổi bàn.
+   */
+  renderDayEscapeBar(state, handlers) {
+    let bar = document.getElementById("day-escape-bar");
+    if (!state || state.customersLeft > 0) {
+      if (bar) bar.remove();
+      return;
+    }
+    if (!bar) {
+      bar = document.createElement("div");
+      bar.id = "day-escape-bar";
+      document.body.appendChild(bar);
+    }
+    bar.style.pointerEvents = "auto";
+    const stuckCust =
+      (state.queue || []).find((c) =>
+        [
+          "waiting_food",
+          "waiting_brew",
+          "waiting_pickup",
+          "eating",
+          "waiting_table",
+          "serving",
+          "seated_ready",
+          "waiting",
+          "walking_in",
+        ].includes(c.phase)
+      ) || state.currentCustomer;
+    const movable = (state.queue || []).find(
+      (c) =>
+        c.service === "dinein" &&
+        ["seated_ready", "serving", "waiting_food", "waiting_brew", "eating"].includes(
+          c.phase
+        )
+    );
+    const bits = [
+      `<button type="button" class="btn btn-primary btn-sm" id="esc-end-day">Kết thúc ngày</button>`,
+    ];
+    if (stuckCust) {
+      bits.push(
+        `<button type="button" class="btn btn-ghost btn-sm" id="esc-unstick">Gỡ treo</button>`
+      );
+    }
+    if (movable && handlers.moveTable) {
+      bits.push(
+        `<button type="button" class="btn btn-secondary btn-sm" id="esc-move">Đổi bàn</button>`
+      );
+    }
+    bar.innerHTML = bits.join(" ");
+    const endBtn = document.getElementById("esc-end-day");
+    if (endBtn) {
+      endBtn.onclick = (ev) => {
+        if (ev && ev.stopPropagation) ev.stopPropagation();
+        if (handlers.forceEndDay) handlers.forceEndDay();
+        else if (handlers.endDay) handlers.endDay();
+      };
+    }
+    const u = document.getElementById("esc-unstick");
+    if (u && stuckCust && handlers.unstickCustomer) {
+      u.onclick = (ev) => {
+        if (ev && ev.stopPropagation) ev.stopPropagation();
+        handlers.unstickCustomer(stuckCust.id);
+      };
+    }
+    const m = document.getElementById("esc-move");
+    if (m && movable && handlers.moveTable) {
+      m.onclick = (ev) => {
+        if (ev && ev.stopPropagation) ev.stopPropagation();
+        handlers.moveTable(movable.id);
+      };
+    }
   },
 
   renderQueue(state, handlers) {
@@ -788,7 +882,12 @@ const UI = {
       const btn = div.querySelector(".take-btn");
       if (btn) btn.onclick = () => handlers.takeOrder(c.id);
       const moveBtn = div.querySelector(".move-btn");
-      if (moveBtn) moveBtn.onclick = () => handlers.moveTable(c.id);
+      if (moveBtn) {
+        moveBtn.onclick = (ev) => {
+          if (ev && ev.stopPropagation) ev.stopPropagation();
+          handlers.moveTable(c.id);
+        };
+      }
       list.appendChild(div);
     });
   },
@@ -1157,6 +1256,7 @@ const UI = {
       root.id = "modal-root-global";
       document.body.appendChild(root);
     }
+    root.style.pointerEvents = "auto";
     root.innerHTML = `<div class="modal-backdrop"><div class="modal card">${html}</div></div>`;
     const local = document.getElementById("modal-root");
     if (local) local.innerHTML = "";
@@ -1165,40 +1265,71 @@ const UI = {
 
   closeModal() {
     const root = document.getElementById("modal-root-global");
-    if (root) root.innerHTML = "";
+    if (root) {
+      root.innerHTML = "";
+      // Remove backdrop nodes completely so they cannot eat clicks
+      root.querySelectorAll(".modal-backdrop").forEach((n) => n.remove());
+      if (root.parentNode && !root.innerHTML.trim()) {
+        // keep root element for reuse; ensure no pointer block
+        root.style.pointerEvents = "none";
+      }
+    }
+    document.querySelectorAll(".modal-backdrop").forEach((n) => n.remove());
     const local = document.getElementById("modal-root");
     if (local) local.innerHTML = "";
+    if (typeof Game !== "undefined" && Game) Game.moveTableCustId = null;
   },
 
   hasModal() {
+    if (document.querySelector(".modal-backdrop")) return true;
     const root = document.getElementById("modal-root-global");
     return !!(root && root.innerHTML.trim());
   },
 
   renderMoveTableModal(state, customer, handlers) {
-    const empties = (state.tables || []).filter((t) => t.status === "empty");
-    const rows = empties.length
-      ? empties
-          .map(
-            (t) =>
-              `<button type="button" class="btn btn-secondary move-table-pick" data-table="${t.id}">
-                🪑 Bàn ${t.id.replace("t", "")} — trống sạch
-              </button>`
-          )
-          .join("")
-      : `<p class="muted">Không còn bàn trống sạch. Hãy dọn bàn bẩn trước.</p>`;
+    const others = (state.tables || []).filter((t) => t.id !== customer.tableId);
+    const empties = others.filter((t) => t.status === "empty");
+    const dirty = others.filter(
+      (t) => t.status === "dirty" || t.status === "cleaning"
+    );
+    const emptyRows = empties
+      .map(
+        (t) =>
+          `<button type="button" class="btn btn-secondary move-table-pick" data-table="${t.id}">
+            🪑 Bàn ${t.id.replace("t", "")} — trống sạch
+          </button>`
+      )
+      .join("");
+    const dirtyRows = dirty
+      .map(
+        (t) =>
+          `<button type="button" class="btn btn-ghost move-table-dirty" data-table="${t.id}">
+            🧹 Bàn ${t.id.replace("t", "")} — Dọn & chuyển
+          </button>`
+      )
+      .join("");
+    const rows =
+      emptyRows + dirtyRows ||
+      `<p class="muted">Không còn bàn khác.</p>`;
     this.modal(`
       <h2>Đổi bàn</h2>
       <p>Chuyển <b>${customer.emoji} ${customer.name}</b>
         ${customer.tableId ? `(đang ở ${customer.tableId.replace("t", "B")})` : ""}
-        sang bàn trống sạch.</p>
+        sang bàn khác (bàn bẩn sẽ được dọn nhanh).</p>
       <div class="move-table-list">${rows}</div>
-      <p class="hint small">Hoặc bấm trực tiếp bàn trống trên sàn quán.</p>
+      <p class="hint small">Hoặc bấm trực tiếp bàn trên sàn quán.</p>
       <button type="button" class="btn btn-ghost" id="modal-close">Huỷ</button>
     `);
     document.getElementById("modal-close").onclick = handlers.cancel;
     document.querySelectorAll(".move-table-pick").forEach((btn) => {
       btn.onclick = () => handlers.pick(btn.getAttribute("data-table"));
+    });
+    document.querySelectorAll(".move-table-dirty").forEach((btn) => {
+      btn.onclick = () => {
+        const id = btn.getAttribute("data-table");
+        if (handlers.pickDirty) handlers.pickDirty(id);
+        else handlers.pick(id);
+      };
     });
   },
 

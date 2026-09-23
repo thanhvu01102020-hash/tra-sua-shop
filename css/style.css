@@ -384,6 +384,44 @@ h1, h2, h3 { margin: 0 0 0.5rem; font-weight: 700; }
   .upgrade-layout { grid-template-columns: 1fr; }
 }
 
+/* Day escape bar — always above modals; never pointer-events:none */
+#day-escape-bar {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 200;
+  pointer-events: auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 14px;
+  background: rgba(61, 44, 62, 0.92);
+  border-radius: 999px;
+  box-shadow: var(--shadow);
+  max-width: min(96vw, 560px);
+}
+#day-escape-bar .btn {
+  pointer-events: auto;
+  box-shadow: none;
+}
+#day-escape-bar .btn-primary {
+  background: linear-gradient(135deg, #f9a8d4, #c4b5fd);
+  color: #3b0764;
+}
+.move-table-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0;
+}
+#modal-root-global {
+  position: relative;
+  z-index: 50;
+}
+
 /* Toast */
 .toast {
   position: fixed;
